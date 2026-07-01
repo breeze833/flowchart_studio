@@ -1,0 +1,12 @@
+{
+  "name": "flowchart_editor",
+  "version": "1.0.0",
+  "description": "Visual structural flowchart drawing application.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "author": "",
+  "license": "ISC"
+}

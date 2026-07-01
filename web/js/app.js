@@ -1,0 +1,1385 @@
+/**
+ * App Module - Main Application Coordinator
+ * Handles event delegation, zoom and pan, toolbar actions, modals, and synchronizing state to UI.
+ */
+
+import {
+  appState,
+  subscribe,
+  insertNode,
+  deleteNode,
+  updateNodeProperty,
+  addProcedure,
+  deleteProcedure,
+  clearState,
+  importState,
+  exportState,
+  findNodeById,
+  renameProcedure,
+  addParameter,
+  deleteParameter,
+  updateParameter,
+  addNote
+} from './state.js';
+
+import {
+  calculateSequenceLayout,
+  arrangeSequence,
+  renderSequenceSVG,
+  renderNotesSVG
+} from './layout.js';
+
+// DOM References
+const svg = document.getElementById("flowchart-svg");
+const contentGroup = document.getElementById("flowchart-content");
+const tabsContainer = document.getElementById("procedure-tabs");
+const addProcBtn = document.getElementById("add-proc-btn");
+const importBtn = document.getElementById("import-btn");
+const exportBtn = document.getElementById("export-btn");
+const exportPdfBtn = document.getElementById("export-pdf-btn");
+const exportSvgBtn = document.getElementById("export-svg-btn");
+const clearBtn = document.getElementById("clear-btn");
+const fileInput = document.getElementById("file-input");
+const inspectorContent = document.getElementById("inspector-content");
+const contextMenu = document.getElementById("context-menu");
+
+// Zoom / Pan Controls
+const zoomInBtn = document.getElementById("zoom-in-btn");
+const zoomOutBtn = document.getElementById("zoom-out-btn");
+const zoomFitBtn = document.getElementById("zoom-fit-btn");
+const zoomIndicator = document.getElementById("zoom-indicator");
+
+// Helper to escape HTML inside inspector inputs
+function escapeHtml(str) {
+  if (typeof str !== 'string') return '';
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+// Modal References
+const modalContainer = document.getElementById("modal-container");
+const modalCloseBtn = document.getElementById("modal-close-btn");
+const modalCancelBtn = document.getElementById("modal-cancel-btn");
+const newProcedureForm = document.getElementById("new-procedure-form");
+const procedureNameInput = document.getElementById("procedure-name-input");
+
+// Zoom / Pan State
+let zoom = 1.0;
+let panX = 0;
+let panY = 0;
+let isPanning = false;
+let startX = 0;
+let startY = 0;
+
+// Note Drag / Resize State
+let activeDraggingNoteId = null;
+let activeResizingNoteId = null;
+let initialMouseX = 0;
+let initialMouseY = 0;
+let initialNoteX = 0;
+let initialNoteY = 0;
+let initialNoteW = 0;
+let initialNoteH = 0;
+
+// Context Menu Insertion State
+let activePath = "";
+let activeIndex = 0;
+
+/**
+ * Initialize Event Listeners
+ */
+function init() {
+  // 1. Zoom and Pan Handlers
+  svg.addEventListener("wheel", handleWheel, { passive: false });
+  svg.addEventListener("mousedown", handleMouseDown);
+  window.addEventListener("mousemove", handleMouseMove);
+  window.addEventListener("mouseup", handleMouseUp);
+  window.addEventListener("resize", handleResize);
+
+  // 2. Zoom Button Handlers
+  zoomInBtn.addEventListener("click", () => triggerZoom(1.2));
+  zoomOutBtn.addEventListener("click", () => triggerZoom(1 / 1.2));
+  zoomFitBtn.addEventListener("click", zoomToFit);
+
+  // 3. Tab Switching Delegation
+  tabsContainer.addEventListener("click", handleTabClick);
+
+  // 4. Global SVG Click Delegation (Nodes and Hitzones)
+  svg.addEventListener("click", handleSvgClick);
+
+  // 5. Context Menu Action Handlers
+  contextMenu.addEventListener("click", handleContextMenuClick);
+  document.addEventListener("click", handleDocumentClick);
+
+  // 6. Modal Procedure Handlers
+  addProcBtn.addEventListener("click", showModal);
+  modalCloseBtn.addEventListener("click", hideModal);
+  modalCancelBtn.addEventListener("click", hideModal);
+  newProcedureForm.addEventListener("submit", handleNewProcedure);
+
+  // 7. File Operations and Note Button
+  const addNoteBtn = document.getElementById("add-note-btn");
+  if (addNoteBtn) {
+    addNoteBtn.addEventListener("click", () => {
+      // Place the note near viewport top-left
+      addNote(60, 60);
+    });
+  }
+  exportBtn.addEventListener("click", handleExport);
+  if (exportPdfBtn) {
+    exportPdfBtn.addEventListener("click", handleExportPDF);
+  }
+  if (exportSvgBtn) {
+    exportSvgBtn.addEventListener("click", handleExportSVG);
+  }
+  importBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", handleImport);
+  clearBtn.addEventListener("click", handleClear);
+
+  // Dropdown Toggling Behavior
+  const fileDropdownBtn = document.getElementById("file-dropdown-btn");
+  const fileDropdown = fileDropdownBtn ? fileDropdownBtn.closest(".dropdown") : null;
+  if (fileDropdownBtn && fileDropdown) {
+    fileDropdownBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      fileDropdown.classList.toggle("open");
+    });
+
+    // Close dropdown on clicking outside
+    document.addEventListener("click", (e) => {
+      if (!fileDropdown.contains(e.target)) {
+        fileDropdown.classList.remove("open");
+      }
+    });
+
+    // Close dropdown when selecting any menu item
+    const dropdownMenu = document.getElementById("file-dropdown-menu");
+    if (dropdownMenu) {
+      dropdownMenu.addEventListener("click", () => {
+        fileDropdown.classList.remove("open");
+      });
+    }
+  }
+
+  // Initialize Lucide Icons
+  lucide.createIcons();
+
+  // Draw initial flowchart
+  render(appState, "structure");
+  setTimeout(zoomToFit, 100);
+}
+
+/**
+ * Rendering Cycles
+ */
+
+// Full update cycle: redraws tabs, layout, SVG, and properties inspector
+function render(state, changeType = "structure") {
+  renderTabs();
+  
+  if (changeType === "structure") {
+    refreshSVGOnly();
+    renderInspector();
+  } else if (changeType === "edit") {
+    refreshSVGOnly();
+  }
+}
+
+// Lightweight update cycle: updates only SVG canvas positioning and content
+function refreshSVGOnly() {
+  const activeProc = appState.procedures[appState.activeScreen];
+  if (!activeProc) return;
+
+  // Calculate layout coordinates bottom-up and top-down
+  const rootLayout = calculateSequenceLayout(activeProc.body, "body");
+  arrangeSequence(rootLayout, 0, 0);
+
+  // Render SVG elements
+  const svgMarkup = renderSequenceSVG(rootLayout, appState.selectedNodeId);
+  const notesMarkup = renderNotesSVG(activeProc.notes || [], appState.selectedNodeId);
+  contentGroup.innerHTML = svgMarkup + notesMarkup;
+
+  // Sync SVG Viewbox bounds
+  updateViewBox();
+}
+
+/**
+ * Zoom and Pan Methods
+ */
+function updateViewBox() {
+  const rect = svg.getBoundingClientRect();
+  const w = rect.width || 800;
+  const h = rect.height || 600;
+
+  const viewBoxW = w / zoom;
+  const viewBoxH = h / zoom;
+
+  svg.setAttribute("viewBox", `${panX} ${panY} ${viewBoxW} ${viewBoxH}`);
+  zoomIndicator.innerText = `${Math.round(zoom * 100)}%`;
+}
+
+function handleWheel(e) {
+  e.preventDefault();
+  const rect = svg.getBoundingClientRect();
+  const mx = e.clientX - rect.left;
+  const my = e.clientY - rect.top;
+
+  const zoomFactor = 1.15;
+  const zoomOld = zoom;
+
+  if (e.deltaY < 0) {
+    zoom = Math.min(zoom * zoomFactor, 4.0);
+  } else {
+    zoom = Math.max(zoom / zoomFactor, 0.25);
+  }
+
+  panX = panX + mx * (1 / zoomOld - 1 / zoom);
+  panY = panY + my * (1 / zoomOld - 1 / zoom);
+
+  updateViewBox();
+}
+
+function handleMouseDown(e) {
+  // 1. Check if clicked a note drag handle
+  const dragHandle = e.target.closest(".note-drag-handle");
+  if (dragHandle) {
+    e.stopPropagation();
+    const noteGroup = dragHandle.closest(".note-group");
+    const id = noteGroup.dataset.id;
+    const note = findNodeById(id);
+    if (note) {
+      activeDraggingNoteId = id;
+      initialMouseX = e.clientX;
+      initialMouseY = e.clientY;
+      initialNoteX = note.x;
+      initialNoteY = note.y;
+      appState.selectedNodeId = id;
+      render(appState, "structure"); // select and show in inspector
+    }
+    return;
+  }
+
+  // 2. Check if clicked a note resize handle
+  const resizeHandle = e.target.closest(".note-resize-handle");
+  if (resizeHandle) {
+    e.stopPropagation();
+    const noteGroup = resizeHandle.closest(".note-group");
+    const id = noteGroup.dataset.id;
+    const note = findNodeById(id);
+    if (note) {
+      activeResizingNoteId = id;
+      initialMouseX = e.clientX;
+      initialMouseY = e.clientY;
+      initialNoteW = note.w;
+      initialNoteH = note.h;
+      appState.selectedNodeId = id;
+      render(appState, "structure");
+    }
+    return;
+  }
+
+  // 3. Check if clicked a note body itself (to select it)
+  const noteGroup = e.target.closest(".note-group[data-type='note']");
+  if (noteGroup) {
+    e.stopPropagation();
+    const id = noteGroup.dataset.id;
+    if (appState.selectedNodeId !== id) {
+      appState.selectedNodeId = id;
+      render(appState, "structure");
+    }
+    return;
+  }
+
+  // 4. Default canvas panning check
+  if (e.target.closest("button") || e.target.closest(".node-group") || e.target.closest(".hitzone")) {
+    return;
+  }
+  isPanning = true;
+  startX = e.clientX;
+  startY = e.clientY;
+  svg.style.cursor = "grabbing";
+}
+
+function handleMouseMove(e) {
+  if (activeDraggingNoteId) {
+    const dx = (e.clientX - initialMouseX) / zoom;
+    const dy = (e.clientY - initialMouseY) / zoom;
+    const note = findNodeById(activeDraggingNoteId);
+    if (note) {
+      note.x = initialNoteX + dx;
+      note.y = initialNoteY + dy;
+      refreshSVGOnly();
+    }
+    return;
+  }
+
+  if (activeResizingNoteId) {
+    const dx = (e.clientX - initialMouseX) / zoom;
+    const dy = (e.clientY - initialMouseY) / zoom;
+    const note = findNodeById(activeResizingNoteId);
+    if (note) {
+      note.w = Math.max(120, initialNoteW + dx);
+      note.h = Math.max(60, initialNoteH + dy);
+      refreshSVGOnly();
+    }
+    return;
+  }
+
+  if (!isPanning) return;
+  const dx = e.clientX - startX;
+  const dy = e.clientY - startY;
+
+  panX -= dx / zoom;
+  panY -= dy / zoom;
+
+  startX = e.clientX;
+  startY = e.clientY;
+
+  updateViewBox();
+}
+
+function handleMouseUp() {
+  if (activeDraggingNoteId || activeResizingNoteId) {
+    activeDraggingNoteId = null;
+    activeResizingNoteId = null;
+  }
+  if (isPanning) {
+    isPanning = false;
+    svg.style.cursor = "grab";
+  }
+}
+
+function handleResize() {
+  updateViewBox();
+}
+
+function triggerZoom(factor) {
+  const rect = svg.getBoundingClientRect();
+  const mx = rect.width / 2;
+  const my = rect.height / 2;
+
+  const zoomOld = zoom;
+  zoom = Math.max(0.25, Math.min(zoom * factor, 4.0));
+
+  panX = panX + mx * (1 / zoomOld - 1 / zoom);
+  panY = panY + my * (1 / zoomOld - 1 / zoom);
+
+  updateViewBox();
+}
+
+function zoomToFit() {
+  const activeProc = appState.procedures[appState.activeScreen];
+  if (!activeProc) return;
+
+  const rootLayout = calculateSequenceLayout(activeProc.body, "body");
+  const rect = svg.getBoundingClientRect();
+  const w = rect.width || 800;
+  const h = rect.height || 600;
+
+  // Find optimal scale to fit diagram with padding
+  const padding = 80;
+  const scaleX = (w - padding) / rootLayout.w;
+  const scaleY = (h - padding) / rootLayout.h;
+  
+  zoom = Math.max(0.4, Math.min(scaleX, scaleY, 1.25));
+
+  // Center horizontally around the sequence's main flowline anchor
+  panX = rootLayout.xAnchor - (w / 2) / zoom;
+  panY = -30; // 30px padding from top
+
+  updateViewBox();
+}
+
+/**
+ * Tab Navigation Methods
+ */
+function renderTabs() {
+  tabsContainer.innerHTML = "";
+  for (const name in appState.procedures) {
+    const isActive = name === appState.activeScreen;
+    const isMain = name === "main";
+
+    const tabEl = document.createElement("div");
+    tabEl.className = `tab ${isActive ? 'active' : ''}`;
+    tabEl.dataset.name = name;
+
+    const icon = isMain ? "play" : "code";
+    
+    tabEl.innerHTML = `
+      <i data-lucide="${icon}"></i>
+      <span>${name}</span>
+      ${!isMain ? `
+        <button class="delete-tab-btn" data-name="${name}" title="Delete subroutine">
+          <i data-lucide="x"></i>
+        </button>
+      ` : ""}
+    `;
+
+    tabsContainer.appendChild(tabEl);
+  }
+  lucide.createIcons({ node: tabsContainer });
+}
+
+function handleTabClick(e) {
+  const deleteBtn = e.target.closest(".delete-tab-btn");
+  if (deleteBtn) {
+    e.stopPropagation();
+    const name = deleteBtn.dataset.name;
+    if (confirm(`Are you sure you want to delete the procedure "${name}"?`)) {
+      deleteProcedure(name);
+      zoomToFit();
+    }
+    return;
+  }
+
+  const tab = e.target.closest(".tab");
+  if (tab) {
+    const name = tab.dataset.name;
+    if (appState.activeScreen !== name) {
+      appState.activeScreen = name;
+      appState.selectedNodeId = null;
+      render(appState, "structure");
+      zoomToFit();
+    }
+  }
+}
+
+/**
+ * Click Delegation & Insertion Trigger
+ */
+function handleSvgClick(e) {
+  // 1. Click Hitzone
+  const hitzone = e.target.closest(".hitzone");
+  if (hitzone) {
+    e.stopPropagation();
+    const path = hitzone.dataset.path;
+    const idx = hitzone.dataset.index;
+    
+    // Position menu at click position
+    activePath = path;
+    activeIndex = parseInt(idx, 10);
+
+    contextMenu.style.left = `${e.clientX}px`;
+    contextMenu.style.top = `${e.clientY}px`;
+    contextMenu.style.display = "block";
+    return;
+  }
+
+  // 2. Click Node Block
+  const nodeGroup = e.target.closest(".node-group");
+  if (nodeGroup) {
+    e.stopPropagation();
+    const id = nodeGroup.dataset.id;
+    if (appState.selectedNodeId !== id) {
+      appState.selectedNodeId = id;
+      render(appState, "structure");
+    }
+    hideContextMenu();
+    return;
+  }
+
+  // 3. Click Canvas Background
+  appState.selectedNodeId = null;
+  hideContextMenu();
+  render(appState, "structure");
+}
+
+function handleContextMenuClick(e) {
+  const btn = e.target.closest(".menu-item");
+  if (!btn) return;
+
+  const type = btn.dataset.type;
+  insertNode(activePath, activeIndex, type);
+  hideContextMenu();
+}
+
+function handleDocumentClick(e) {
+  if (!contextMenu.contains(e.target)) {
+    hideContextMenu();
+  }
+}
+
+function hideContextMenu() {
+  contextMenu.style.display = "none";
+}
+
+/**
+ * Sidebar Inspector Rendering
+ */
+function renderInspector() {
+  if (!appState.selectedNodeId) {
+    inspectorContent.innerHTML = `
+      <div class="empty-state">
+        <i data-lucide="mouse-pointer" class="empty-icon"></i>
+        <p>Select a block in the flowchart to inspect and edit its properties.</p>
+      </div>
+    `;
+    lucide.createIcons({ node: inspectorContent });
+    return;
+  }
+
+  const node = findNodeById(appState.selectedNodeId);
+  if (!node) {
+    appState.selectedNodeId = null;
+    renderInspector();
+    return;
+  }
+
+  let fieldsHtml = "";
+  let title = "";
+  let description = "";
+
+  switch (node.type) {
+    case "start": {
+      title = "Start Block";
+      description = "Marks the starting point of execution. You can manage the procedure name and parameters here.";
+      const activeProc = appState.procedures[appState.activeScreen];
+      const params = activeProc ? (activeProc.parameters || []) : [];
+
+      let paramsListHtml = "";
+      if (params.length === 0) {
+        paramsListHtml = `
+          <div class="empty-params" style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 12px; font-style: italic;">
+            No parameters defined.
+          </div>
+        `;
+      } else {
+        paramsListHtml = params.map((param, idx) => `
+          <div class="param-row" style="display: flex; gap: 8px; margin-bottom: 8px; align-items: center;">
+            <input type="text" class="form-control inspect-param-input" data-index="${idx}" value="${escapeHtml(param)}" placeholder="Parameter name">
+            <button class="btn btn-danger btn-icon-only delete-param-btn" data-index="${idx}" title="Delete Parameter" style="padding: 6px;">
+              <i data-lucide="trash-2" style="width: 14px; height: 14px;"></i>
+            </button>
+          </div>
+        `).join("");
+      }
+
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-proc-name">Procedure Name</label>
+          <input type="text" id="inspect-proc-name" class="form-control" value="${escapeHtml(activeProc.name)}" style="margin-bottom: 16px;" ${activeProc.name === 'main' ? 'disabled' : ''}>
+          
+          <label>Parameters</label>
+          <div class="params-list" id="params-list">
+            ${paramsListHtml}
+          </div>
+          <button id="add-param-btn" class="btn btn-secondary" style="width: 100%; margin-top: 8px; justify-content: center;">
+            <i data-lucide="plus" style="width: 14px; height: 14px;"></i> Add Parameter
+          </button>
+        </div>
+      `;
+      break;
+    }
+    case "end":
+      title = "End Block";
+      description = "Marks the end of execution for the main program.";
+      break;
+    case "return":
+      title = "Return Block";
+      description = "Terminates this subroutine and returns a value or expression to the caller.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-expression">Return Value / Expression</label>
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total, 0, or x + y" value="${node.expression || ''}">
+          <small class="form-help">Enter the value or expression to return (optional).</small>
+        </div>
+      `;
+      break;
+    case "input":
+      title = "Input Block";
+      description = "Prompts the user to enter a value, then assigns it to a variable.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-variable">Variable Name</label>
+          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., age" value="${node.variable || ''}">
+          <small class="form-help">Enter the variable to store the user's input.</small>
+        </div>
+      `;
+      break;
+    case "output":
+      title = "Output Block";
+      description = "Evaluates an expression and prints the result to the output screen.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-expression">Expression / Message</label>
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., &quot;Hello &quot; &amp; name" value="${node.expression || ''}">
+          <small class="form-help">Variables or strings wrapped in quotes (e.g., "Hello").</small>
+        </div>
+      `;
+      break;
+    case "assignment":
+      title = "Assignment Block";
+      description = "Computes an expression value and stores it in a variable.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-variable">Variable</label>
+          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., total" value="${node.variable || ''}">
+        </div>
+        <div class="form-group">
+          <label for="inspect-expression">Value / Expression</label>
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total + price" value="${node.expression || ''}">
+        </div>
+      `;
+      break;
+    case "call": {
+      title = "Call Block";
+      description = "Invokes a subroutine procedure and passes arguments.";
+      const subroutines = Object.keys(appState.procedures).filter(name => name !== "main");
+      const optionsHtml = subroutines.map(name => `<option value="${name}" ${node.procedure === name ? 'selected' : ''}>${name}</option>`).join("");
+      const isCustomName = node.procedure && !subroutines.includes(node.procedure);
+
+      const customName = node.procedure || "";
+      const showAddBtn = isCustomName && customName.trim() !== "" && !appState.procedures[customName.trim()];
+
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-procedure">Procedure Name</label>
+          <select id="inspect-procedure" class="form-control" style="margin-bottom: 8px;">
+            <option value="" ${!node.procedure ? 'selected' : ''}>-- Select Procedure --</option>
+            ${optionsHtml}
+            <option value="__custom__" ${isCustomName ? 'selected' : ''}>[ Custom Name ]</option>
+          </select>
+          <div id="custom-proc-input-container" style="${isCustomName ? '' : 'display: none;'}">
+            <input type="text" id="inspect-procedure-text" class="form-control" placeholder="e.g., calculateTax" value="${escapeHtml(customName)}">
+            ${showAddBtn ? `
+              <button type="button" id="add-custom-proc-btn" class="btn btn-secondary" style="width: 100%; margin-top: 8px; justify-content: center; gap: 6px;">
+                <i data-lucide="plus-circle" style="width: 14px; height: 14px;"></i> Create Subroutine "${escapeHtml(customName)}"
+              </button>
+            ` : ''}
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="inspect-arguments">Arguments</label>
+          <input type="text" id="inspect-arguments" class="form-control" placeholder="e.g., score, 10" value="${node.arguments || ''}">
+          <small class="form-help">Separate multiple arguments with commas.</small>
+        </div>
+      `;
+      break;
+    }
+    case "if":
+      title = "If-Else Decision";
+      description = "Evaluates a condition. If true, takes the left path; if false, takes the right path.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-condition">Condition Statement</label>
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &gt;= 10" value="${node.condition || ''}">
+          <small class="form-help">Must evaluate to a boolean (e.g., count &lt; limit).</small>
+        </div>
+      `;
+      break;
+    case "while":
+      title = "While Loop";
+      description = "Loops execution of body blocks as long as the condition evaluates to true.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-condition">Loop Condition</label>
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &lt; 5" value="${node.condition || ''}">
+        </div>
+      `;
+      break;
+    case "do-while":
+      title = "Do-While Loop";
+      description = "Executes loop body first, then repeats as long as the condition evaluates to true.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-condition">Loop Condition</label>
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., flag == true" value="${node.condition || ''}">
+        </div>
+      `;
+      break;
+    case "note":
+      title = "Note Block";
+      description = "A free-floating canvas note. Drag it by its header and resize it from the bottom-right grip.";
+      fieldsHtml = `
+        <div class="form-group">
+          <label for="inspect-note-text">Note Content</label>
+          <textarea id="inspect-note-text" class="form-control" rows="6" placeholder="Write your note here...">${node.text || ''}</textarea>
+        </div>
+      `;
+      break;
+  }
+
+  const isTerminal = node.type === "start" || node.type === "end" || node.type === "return";
+
+  inspectorContent.innerHTML = `
+    <div class="node-info-card">
+      <div class="node-info-title">
+        <i data-lucide="help-circle" class="header-icon"></i>
+        <span>${title}</span>
+      </div>
+      <div class="node-info-desc">${description}</div>
+    </div>
+    <div class="node-properties-form">
+      ${fieldsHtml}
+    </div>
+    ${!isTerminal ? `
+      <div class="node-danger-zone">
+        <button id="inspect-delete-btn" class="btn btn-danger" style="width: 100%;">
+          <i data-lucide="trash-2"></i> Delete Block
+        </button>
+      </div>
+    ` : ""}
+  `;
+
+  lucide.createIcons({ node: inspectorContent });
+
+  // Attach direct input event listeners (triggers real-time layout changes without re-creating inputs)
+  const varInput = document.getElementById("inspect-variable");
+  const exprInput = document.getElementById("inspect-expression");
+  const condInput = document.getElementById("inspect-condition");
+  const deleteBtn = document.getElementById("inspect-delete-btn");
+
+  if (varInput) {
+    varInput.addEventListener("input", (e) => {
+      updateNodeProperty(node.id, "variable", e.target.value);
+    });
+  }
+  if (exprInput) {
+    exprInput.addEventListener("input", (e) => {
+      updateNodeProperty(node.id, "expression", e.target.value);
+    });
+  }
+  if (condInput) {
+    condInput.addEventListener("input", (e) => {
+      updateNodeProperty(node.id, "condition", e.target.value);
+    });
+  }
+  const procSelect = document.getElementById("inspect-procedure");
+  const procTextInput = document.getElementById("inspect-procedure-text");
+  const argsInput = document.getElementById("inspect-arguments");
+
+  if (procSelect) {
+    procSelect.addEventListener("change", (e) => {
+      const val = e.target.value;
+      const container = document.getElementById("custom-proc-input-container");
+      if (val === "__custom__") {
+        container.style.display = "block";
+        procTextInput.focus();
+      } else {
+        container.style.display = "none";
+        updateNodeProperty(node.id, "procedure", val);
+      }
+    });
+  }
+  if (procTextInput) {
+    procTextInput.addEventListener("input", (e) => {
+      const rawVal = e.target.value;
+      updateNodeProperty(node.id, "procedure", rawVal);
+
+      const val = rawVal.trim();
+      let addBtn = document.getElementById("add-custom-proc-btn");
+      const exists = appState.procedures[val] || val === "";
+
+      if (exists) {
+        if (addBtn) addBtn.remove();
+      } else {
+        if (!addBtn) {
+          addBtn = document.createElement("button");
+          addBtn.type = "button";
+          addBtn.id = "add-custom-proc-btn";
+          addBtn.className = "btn btn-secondary";
+          addBtn.style.width = "100%";
+          addBtn.style.marginTop = "8px";
+          addBtn.style.justifyContent = "center";
+          addBtn.style.gap = "6px";
+          procTextInput.parentNode.appendChild(addBtn);
+
+          addBtn.addEventListener("click", () => {
+            handleAddCustomProc(procTextInput.value.trim());
+          });
+        }
+        addBtn.innerHTML = `<i data-lucide="plus-circle" style="width: 14px; height: 14px;"></i> Create Subroutine "${escapeHtml(val)}"`;
+        lucide.createIcons({ node: addBtn });
+      }
+    });
+  }
+  if (argsInput) {
+    argsInput.addEventListener("input", (e) => {
+      updateNodeProperty(node.id, "arguments", e.target.value);
+    });
+  }
+
+  // Hook up initial create subroutine button if rendered statically
+  const addBtnInit = document.getElementById("add-custom-proc-btn");
+  if (addBtnInit) {
+    addBtnInit.addEventListener("click", () => {
+      handleAddCustomProc(procTextInput.value.trim());
+    });
+  }
+
+  function handleAddCustomProc(procName) {
+    const name = procName.trim();
+    if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(name)) {
+      alert("Must be a valid identifier starting with a letter.");
+      return;
+    }
+
+    const currentScreen = appState.activeScreen;
+    const nodeId = node.id;
+
+    if (addProcedure(name)) {
+      appState.activeScreen = currentScreen;
+      appState.selectedNodeId = nodeId;
+      render(appState, "structure"); // trigger full redraw to update dropdown/tabs
+    } else {
+      alert("Failed to create subroutine.");
+    }
+  }
+
+  // Start node parameter and naming bindings
+  const procNameInput = document.getElementById("inspect-proc-name");
+  const addParamBtn = document.getElementById("add-param-btn");
+  const paramInputs = document.querySelectorAll(".inspect-param-input");
+  const deleteParamBtns = document.querySelectorAll(".delete-param-btn");
+
+  if (procNameInput) {
+    procNameInput.addEventListener("change", (e) => {
+      const oldName = appState.activeScreen;
+      const newName = e.target.value.trim();
+      if (newName === "") return;
+      if (!/^[a-zA-Z][a-zA-Z0-9_]*$/.test(newName)) {
+        alert("Must be a valid identifier starting with a letter.");
+        procNameInput.value = oldName;
+        return;
+      }
+      if (!renameProcedure(oldName, newName)) {
+        alert("Procedure name already exists or is invalid.");
+        procNameInput.value = oldName;
+      }
+    });
+  }
+
+  if (addParamBtn) {
+    addParamBtn.addEventListener("click", () => {
+      addParameter("param");
+    });
+  }
+
+  paramInputs.forEach(input => {
+    input.addEventListener("input", (e) => {
+      const idx = parseInt(e.target.dataset.index, 10);
+      updateParameter(idx, e.target.value);
+    });
+  });
+
+  deleteParamBtns.forEach(btn => {
+    btn.addEventListener("click", () => {
+      const idx = parseInt(btn.dataset.index, 10);
+      deleteParameter(idx);
+    });
+  });
+
+  const noteTextInput = document.getElementById("inspect-note-text");
+  if (noteTextInput) {
+    noteTextInput.addEventListener("input", (e) => {
+      updateNodeProperty(node.id, "text", e.target.value);
+    });
+  }
+
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", () => {
+      deleteNode(node.id);
+    });
+  }
+}
+
+/**
+ * Modal Subroutine Procedure Dialog
+ */
+function showModal() {
+  modalContainer.style.display = "flex";
+  procedureNameInput.value = "";
+  procedureNameInput.focus();
+}
+
+function hideModal() {
+  modalContainer.style.display = "none";
+}
+
+function handleNewProcedure(e) {
+  e.preventDefault();
+  const name = procedureNameInput.value.trim();
+  if (addProcedure(name)) {
+    hideModal();
+    zoomToFit();
+  } else {
+    alert("Procedure name already exists or is invalid.");
+  }
+}
+
+/**
+ * File Actions & Operations
+ */
+function handleExport() {
+  const stateStr = exportState();
+  const blob = new Blob([stateStr], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `flowchart-${appState.activeScreen}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function handleExportPDF() {
+  const originalText = exportPdfBtn.innerHTML;
+
+  // Dynamically load jsPDF library if not already loaded in the window
+  if (!window.jspdf) {
+    exportPdfBtn.innerHTML = `<i data-lucide="loader-2" class="animate-spin" style="width: 14px; height: 14px; margin-right: 6px;"></i> Loading PDF Library...`;
+    exportPdfBtn.disabled = true;
+    lucide.createIcons({ node: exportPdfBtn });
+
+    try {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js";
+        script.onload = resolve;
+        script.onerror = () => reject(new Error("Failed to download PDF library from CDN."));
+        document.body.appendChild(script);
+      });
+    } catch (error) {
+      alert("Failed to load PDF library. Please check your internet connection.");
+      exportPdfBtn.innerHTML = originalText;
+      exportPdfBtn.disabled = false;
+      lucide.createIcons({ node: exportPdfBtn });
+      return;
+    }
+  }
+
+  const { jsPDF } = window.jspdf;
+  if (!jsPDF) {
+    alert("jsPDF library not loaded.");
+    return;
+  }
+
+  // Show generating loading state
+  exportPdfBtn.innerHTML = `<i data-lucide="loader-2" class="animate-spin" style="width: 14px; height: 14px; margin-right: 6px;"></i> Generating PDF...`;
+  exportPdfBtn.disabled = true;
+  lucide.createIcons({ node: exportPdfBtn });
+
+  // Save the user's current screen and selection to restore later
+  const originalScreen = appState.activeScreen;
+  const originalSelectedNodeId = appState.selectedNodeId;
+
+  try {
+    const procedureNames = Object.keys(appState.procedures);
+    if (procedureNames.length === 0) return;
+
+    let pdfInstance = null;
+
+    // Loop through each procedure, render it, and add it as a PDF page
+    for (let i = 0; i < procedureNames.length; i++) {
+      const procName = procedureNames[i];
+      
+      // 1. Temporarily switch the active screen and select nothing
+      appState.activeScreen = procName;
+      appState.selectedNodeId = null;
+      
+      // 2. Force layout coordinates and render SVG markup onto the DOM
+      refreshSVGOnly();
+
+      // 3. Get the exact bounding box of the newly drawn content
+      const bbox = contentGroup.getBBox();
+      const padding = 30;
+      const exportW = Math.max(100, bbox.width + padding * 2);
+      const exportH = Math.max(100, bbox.height + padding * 2);
+
+      // 4. Clone the main SVG
+      const clonedSvg = svg.cloneNode(true);
+      
+      // Set static dimensions and viewBox matching the bounding box
+      clonedSvg.setAttribute("width", exportW);
+      clonedSvg.setAttribute("height", exportH);
+      clonedSvg.setAttribute("viewBox", `${bbox.x - padding} ${bbox.y - padding} ${exportW} ${exportH}`);
+      
+      // Remove zoom and pan transform from content group in cloned SVG
+      const clonedContentGroup = clonedSvg.querySelector("#flowchart-content");
+      if (clonedContentGroup) {
+        clonedContentGroup.removeAttribute("transform");
+      }
+      
+      // Remove all hitzone buttons and hover indicators from the cloned SVG DOM completely
+      clonedSvg.querySelectorAll(".plus-button-bg").forEach(el => el.remove());
+      clonedSvg.querySelectorAll(".plus-button-icon").forEach(el => el.remove());
+      clonedSvg.querySelectorAll(".hit-indicator").forEach(el => el.remove());
+      clonedSvg.querySelectorAll(".note-resize-handle").forEach(el => el.remove());
+
+      // Embed styling rules directly inside the SVG
+      // Using static CSS declarations to guarantee no external CORS network requests, preventing canvas tainting
+      const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+      styleEl.textContent = `
+        .node-group {
+          cursor: pointer;
+        }
+        .node-shape {
+          stroke-width: 1.5px;
+        }
+        /* Node specific fills */
+        [data-type="start"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
+        [data-type="end"] .node-shape { fill: url(#grad-end); stroke: rgba(248, 113, 113, 0.4); }
+        [data-type="return"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
+        [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: rgba(96, 165, 250, 0.4); }
+        [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: rgba(167, 139, 250, 0.4); }
+        [data-type="call"] .node-shape { fill: url(#grad-call); stroke: rgba(244, 114, 182, 0.4); }
+        [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: rgba(251, 146, 60, 0.4); }
+        [data-type="note"] .node-shape { fill: rgba(250, 204, 21, 0.06); stroke: rgba(250, 204, 21, 0.3); }
+
+        /* Flowlines */
+        .flowline {
+          stroke: rgba(148, 163, 184, 0.35);
+          stroke-width: 2.5px;
+          stroke-linecap: round;
+          fill: none;
+        }
+        .flowline-arrow {
+          fill: rgba(148, 163, 184, 0.35);
+        }
+        .loop-back-line {
+          stroke: rgba(148, 163, 184, 0.35);
+          stroke-width: 2.5px;
+          stroke-dasharray: 4 3;
+          fill: none;
+        }
+
+        /* Labels and Containers */
+        .node-label-container {
+          display: flex;
+          flex-direction: column;
+          justify-content: center;
+          align-items: center;
+          height: 100%;
+          color: white;
+          text-align: center;
+          font-family: system-ui, -apple-system, sans-serif;
+        }
+        .node-type {
+          font-size: 0.65rem;
+          text-transform: uppercase;
+          font-weight: 700;
+          letter-spacing: 0.05em;
+          opacity: 0.75;
+          margin-bottom: 2px;
+        }
+        .node-expression {
+          font-size: 0.85rem;
+          font-weight: 500;
+          font-family: monospace;
+          width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        
+        /* Diamond wraps */
+        [data-type="if"] .node-expression,
+        [data-type="while"] .node-expression,
+        [data-type="do-while"] .node-expression {
+          font-size: 0.78rem;
+          font-weight: 500;
+          max-width: 120px;
+          white-space: normal;
+          word-break: break-all;
+          display: -webkit-box;
+          -webkit-line-clamp: 3;
+          -webkit-box-orient: vertical;
+          line-height: 1.25;
+        }
+
+        .line-label {
+          font-family: system-ui, -apple-system, sans-serif;
+          font-size: 0.75rem;
+          font-weight: 600;
+          fill: #94a3b8;
+        }
+        .line-label.true-label { fill: #34d399; }
+        .line-label.false-label { fill: #f87171; }
+
+        /* Sticky note specifics */
+        .note-drag-handle {
+          fill: rgba(250, 204, 21, 0.12);
+        }
+        .note-text-container {
+          color: #fef08a;
+          font-size: 0.8rem;
+          line-height: 1.4;
+          word-break: break-word;
+          font-family: system-ui, -apple-system, sans-serif;
+        }
+      `;
+      clonedSvg.insertBefore(styleEl, clonedSvg.firstChild);
+
+      // Serialize SVG to XML string
+      const serializer = new XMLSerializer();
+      const svgString = serializer.serializeToString(clonedSvg);
+
+      // Convert SVG to inline Data URL to bypass CORS/origin checks and prevent canvas tainting
+      const url = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svgString);
+
+      // Load SVG into Image
+      const img = new Image();
+      await new Promise((resolve, reject) => {
+        img.onload = resolve;
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      // Draw Image to Canvas at 2.5x resolution for ultra-sharp vector details
+      const canvas = document.createElement("canvas");
+      const scale = 2.5;
+      canvas.width = exportW * scale;
+      canvas.height = exportH * scale;
+      
+      const ctx = canvas.getContext("2d");
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      
+      // Fill canvas background to preserve the premium slate-900 look
+      ctx.fillStyle = "#0f172a";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // Draw the scaled SVG image onto canvas
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+      // Export Canvas as high-quality PNG data URL
+      const imgData = canvas.toDataURL("image/png");
+
+      // Create PDF page matching the flowchart aspect ratio
+      // 1 px = 0.75 points
+      const pdfW = exportW * 0.75;
+      const pdfH = exportH * 0.75;
+
+      if (i === 0) {
+        pdfInstance = new jsPDF({
+          orientation: pdfW > pdfH ? "landscape" : "portrait",
+          unit: "pt",
+          format: [pdfW, pdfH]
+        });
+      } else {
+        pdfInstance.addPage([pdfW, pdfH], pdfW > pdfH ? "landscape" : "portrait");
+      }
+
+      pdfInstance.addImage(imgData, "PNG", 0, 0, pdfW, pdfH);
+    }
+
+    if (pdfInstance) {
+      pdfInstance.save("flowchart_studio_export.pdf");
+    }
+
+  } catch (error) {
+    console.error("PDF Export failed:", error);
+    alert("Export to PDF failed. See console for details.");
+  } finally {
+    // Restore the user's active screen and selection
+    appState.activeScreen = originalScreen;
+    appState.selectedNodeId = originalSelectedNodeId;
+    render(appState, "structure");
+
+    exportPdfBtn.innerHTML = originalText;
+    exportPdfBtn.disabled = false;
+    lucide.createIcons({ node: exportPdfBtn });
+  }
+}
+
+function handleExportSVG() {
+  try {
+    const activeProc = appState.procedures[appState.activeScreen];
+    if (!activeProc) return;
+
+    // Save user selection to restore later
+    const originalSelectedNodeId = appState.selectedNodeId;
+    
+    // Clear selection so borders are not exported
+    appState.selectedNodeId = null;
+    refreshSVGOnly();
+
+    // Get the exact bounding box of the contents
+    const bbox = contentGroup.getBBox();
+    const padding = 20;
+    const exportW = Math.max(100, bbox.width + padding * 2);
+    const exportH = Math.max(100, bbox.height + padding * 2);
+
+    // Clone the main SVG
+    const clonedSvg = svg.cloneNode(true);
+    
+    // Set static dimensions and viewBox matching the bounding box
+    clonedSvg.setAttribute("width", exportW);
+    clonedSvg.setAttribute("height", exportH);
+    clonedSvg.setAttribute("viewBox", `${bbox.x - padding} ${bbox.y - padding} ${exportW} ${exportH}`);
+    
+    // Remove the infinite grid background rect to make it transparent
+    const gridRect = clonedSvg.querySelector('rect[fill="url(#grid)"]');
+    if (gridRect) {
+      gridRect.remove();
+    }
+
+    // Remove zoom and pan transform from content group in cloned SVG
+    const clonedContentGroup = clonedSvg.querySelector("#flowchart-content");
+    if (clonedContentGroup) {
+      clonedContentGroup.removeAttribute("transform");
+    }
+    
+    // Remove all hitzone buttons and hover indicators from the cloned SVG DOM completely
+    clonedSvg.querySelectorAll(".plus-button-bg").forEach(el => el.remove());
+    clonedSvg.querySelectorAll(".plus-button-icon").forEach(el => el.remove());
+    clonedSvg.querySelectorAll(".hit-indicator").forEach(el => el.remove());
+    clonedSvg.querySelectorAll(".note-resize-handle").forEach(el => el.remove());
+
+    // Embed styling rules directly inside the SVG
+    const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
+    styleEl.textContent = `
+      .node-group {
+        cursor: pointer;
+      }
+      .node-shape {
+        stroke-width: 1.5px;
+      }
+      /* Node specific fills */
+      [data-type="start"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
+      [data-type="end"] .node-shape { fill: url(#grad-end); stroke: rgba(248, 113, 113, 0.4); }
+      [data-type="return"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
+      [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: rgba(96, 165, 250, 0.4); }
+      [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: rgba(167, 139, 250, 0.4); }
+      [data-type="call"] .node-shape { fill: url(#grad-call); stroke: rgba(244, 114, 182, 0.4); }
+      [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: rgba(251, 146, 60, 0.4); }
+      [data-type="note"] .node-shape { fill: rgba(250, 204, 21, 0.06); stroke: rgba(250, 204, 21, 0.3); }
+
+      /* Flowlines */
+      .flowline {
+        stroke: rgba(148, 163, 184, 0.35);
+        stroke-width: 2.5px;
+        stroke-linecap: round;
+        fill: none;
+      }
+      .flowline-arrow {
+        fill: rgba(148, 163, 184, 0.35);
+      }
+      .loop-back-line {
+        stroke: rgba(148, 163, 184, 0.35);
+        stroke-width: 2.5px;
+        stroke-dasharray: 4 3;
+        fill: none;
+      }
+
+      /* Labels and Containers */
+      .node-label-container {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: center;
+        height: 100%;
+        color: white;
+        text-align: center;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .node-type {
+        font-size: 0.65rem;
+        text-transform: uppercase;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        opacity: 0.75;
+        margin-bottom: 2px;
+      }
+      .node-expression {
+        font-size: 0.85rem;
+        font-weight: 500;
+        font-family: monospace;
+        width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      
+      /* Diamond wraps */
+      [data-type="if"] .node-expression,
+      [data-type="while"] .node-expression,
+      [data-type="do-while"] .node-expression {
+        font-size: 0.78rem;
+        font-weight: 500;
+        max-width: 120px;
+        white-space: normal;
+        word-break: break-all;
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        line-height: 1.25;
+      }
+
+      .line-label {
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 0.75rem;
+        font-weight: 600;
+        fill: #94a3b8;
+      }
+      .line-label.true-label { fill: #34d399; }
+      .line-label.false-label { fill: #f87171; }
+
+      /* Sticky note specifics */
+      .note-drag-handle {
+        fill: rgba(250, 204, 21, 0.12);
+      }
+      .note-text-container {
+        color: #fef08a;
+        font-size: 0.8rem;
+        line-height: 1.4;
+        word-break: break-word;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+    `;
+    clonedSvg.insertBefore(styleEl, clonedSvg.firstChild);
+
+    // Serialize SVG to XML string
+    const serializer = new XMLSerializer();
+    const svgString = serializer.serializeToString(clonedSvg);
+
+    // Download Standalone SVG File
+    const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${activeProc.name}_flowchart.svg`;
+    a.click();
+    URL.revokeObjectURL(url);
+
+    // Restore user state
+    appState.selectedNodeId = originalSelectedNodeId;
+    render(appState, "structure");
+
+  } catch (error) {
+    console.error("SVG Export failed:", error);
+    alert("Export to SVG failed. See console for details.");
+  }
+}
+
+function handleImport(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  const reader = new FileReader();
+  reader.onload = (event) => {
+    if (importState(event.target.result)) {
+      zoomToFit();
+    }
+  };
+  reader.readAsText(file);
+  e.target.value = ""; // clear selector input
+}
+
+function handleClear() {
+  if (confirm("Are you sure you want to clear all flowchart screens? This will reset the workspace.")) {
+    clearState();
+    zoomToFit();
+  }
+}
+
+// Subscribe to global state changes
+subscribe((state, changeType) => {
+  render(state, changeType);
+});
+
+// Run Init
+init();
