@@ -71,32 +71,93 @@
     </header>
 
     <div class="main-layout">
-      <!-- Sidebar Inspector Panel -->
+      <!-- Sidebar Panel (Properties and Console) -->
       <aside class="sidebar" id="inspector-panel">
-        <div class="sidebar-header">
-          <i data-lucide="sliders" class="header-icon"></i>
-          <h2>Properties</h2>
-        </div>
         
-        <!-- Inspector Form Content -->
-        <div class="inspector-content" id="inspector-content">
-          <div class="empty-state">
-            <i data-lucide="mouse-pointer" class="empty-icon"></i>
-            <p>Select a block in the flowchart to inspect and edit its properties.</p>
+        <!-- Sidebar Navigation Tabs -->
+        <div class="sidebar-tabs">
+          <button id="sidebar-tab-properties" class="sidebar-tab active" title="Properties Inspector">
+            <i data-lucide="sliders" class="tab-icon"></i>
+            <span>Properties</span>
+          </button>
+          <button id="sidebar-tab-terminal" class="sidebar-tab" title="Terminal Console">
+            <i data-lucide="terminal" class="tab-icon"></i>
+            <span>Console</span>
+          </button>
+        </div>
+
+        <!-- 1. Properties Pane -->
+        <div id="properties-pane" class="sidebar-pane active">
+          <!-- Inspector Form Content -->
+          <div class="inspector-content" id="inspector-content">
+            <div class="empty-state">
+              <i data-lucide="mouse-pointer" class="empty-icon"></i>
+              <p>Select a block in the flowchart to inspect and edit its properties.</p>
+            </div>
+          </div>
+          
+          <!-- Block Information / Legend -->
+          <div class="sidebar-footer" id="sidebar-legend-panel">
+            <div class="legend-header" id="toggle-legend-btn">
+              <h3>Block Legend</h3>
+              <i data-lucide="chevron-down" class="legend-chevron"></i>
+            </div>
+            <div class="guide-grid" id="legend-content">
+              <div class="guide-item"><span class="badge start-badge"></span> Start/End</div>
+              <div class="guide-item"><span class="badge io-badge"></span> Input/Output</div>
+              <div class="guide-item"><span class="badge assign-badge"></span> Assignment</div>
+              <div class="guide-item"><span class="badge cond-badge"></span> Conditionals</div>
+              <div class="guide-item"><span class="badge call-badge"></span> Call Block</div>
+            </div>
           </div>
         </div>
 
-        <!-- Block Information / Legend -->
-        <div class="sidebar-footer">
-          <div class="guide-grid">
-            <div class="guide-item"><span class="badge start-badge"></span> Start/End</div>
-            <div class="guide-item"><span class="badge io-badge"></span> Input/Output</div>
-            <div class="guide-item"><span class="badge assign-badge"></span> Assignment</div>
-            <div class="guide-item"><span class="badge cond-badge"></span> Conditionals</div>
-            <div class="guide-item"><span class="badge call-badge"></span> Call Block</div>
+        <!-- 2. Terminal Pane -->
+        <div id="terminal-pane" class="sidebar-pane">
+          <!-- Execution controls toolbar -->
+          <div class="terminal-controls-header">
+            <div class="control-row">
+              <button id="run-btn" class="btn btn-success btn-sm" title="Run Flowchart">
+                <i data-lucide="play"></i> Run
+              </button>
+              <button id="pause-btn" class="btn btn-secondary btn-sm" title="Pause" disabled>
+                <i data-lucide="pause"></i> Pause
+              </button>
+              <button id="step-btn" class="btn btn-secondary btn-sm" title="Step Over (Single Step)">
+                <i data-lucide="skip-forward"></i> Step
+              </button>
+              <button id="stop-btn" class="btn btn-danger btn-sm" title="Stop & Reset" disabled>
+                <i data-lucide="square"></i> Stop
+              </button>
+            </div>
+            <div class="control-row secondary-controls">
+              <div class="speed-control">
+                <span>Speed:</span>
+                <input type="range" id="speed-slider" min="50" max="1000" step="50" value="300" title="Execution step delay">
+                <span id="speed-val" class="speed-val">300ms</span>
+              </div>
+              <button id="clear-console-btn" class="btn btn-secondary btn-icon-only btn-sm" title="Clear Terminal">
+                <i data-lucide="trash-2"></i>
+              </button>
+            </div>
+          </div>
+
+          <!-- Console Terminal Logs -->
+          <div class="console-body" id="console-output">
+            <div class="console-line system-line">Flowchart Studio Terminal. Press "Run" to execute diagram.</div>
+          </div>
+
+          <!-- Console Terminal Input Line -->
+          <div class="console-input-line" id="console-input-container" style="display: none;">
+            <span class="prompt">></span>
+            <input type="text" id="console-input" placeholder="Enter input value here..." autocomplete="off">
           </div>
         </div>
+
       </aside>
+
+      <!-- Sidebar Resizer Splitter Drag Handle -->
+      <div id="sidebar-resizer" class="sidebar-resizer"></div>
 
       <!-- Main Canvas Container -->
       <main class="canvas-container">

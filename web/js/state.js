@@ -72,6 +72,7 @@ export function createNode(type) {
       break;
     case "output":
       node.expression = '"Hello World"';
+      node.newline = true;
       break;
     case "assignment":
       node.variable = "x";

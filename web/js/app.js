@@ -29,6 +29,9 @@ import {
   renderNotesSVG
 } from './layout.js';
 
+import { JSExpressionEvaluator } from './evaluator.js';
+import { FlowchartInterpreter } from './interpreter.js';
+
 // DOM References
 const svg = document.getElementById("flowchart-svg");
 const contentGroup = document.getElementById("flowchart-content");
@@ -88,6 +91,326 @@ let initialNoteH = 0;
 // Context Menu Insertion State
 let activePath = "";
 let activeIndex = 0;
+
+// Execution Runner State
+const evaluator = new JSExpressionEvaluator();
+let interpreter = null;
+let generator = null;
+let autoRunTimer = null;
+let currentHighlightedNodeId = null;
+let isStepMode = false;
+let isWaitingForInput = false;
+let lastLineEndedWithNewline = true;
+
+// DOM References for Sidebar Tabs and Panes
+const sidebarTabProperties = document.getElementById("sidebar-tab-properties");
+const sidebarTabTerminal = document.getElementById("sidebar-tab-terminal");
+const propertiesPane = document.getElementById("properties-pane");
+const terminalPane = document.getElementById("terminal-pane");
+const consoleOutput = document.getElementById("console-output");
+
+/* --- Flowchart Execution Controller --- */
+
+function switchSidebarPane(activePaneName) {
+  if (activePaneName === "properties") {
+    sidebarTabProperties.classList.add("active");
+    sidebarTabTerminal.classList.remove("active");
+    propertiesPane.classList.add("active");
+    terminalPane.classList.remove("active");
+  } else if (activePaneName === "terminal") {
+    sidebarTabProperties.classList.remove("active");
+    sidebarTabTerminal.classList.add("active");
+    propertiesPane.classList.remove("active");
+    terminalPane.classList.add("active");
+  }
+}
+
+function logToConsole(text, type = "system", newline = true) {
+  // Replace tabs with 8 spaces
+  let formattedText = String(text).replace(/\t/g, "        ");
+  
+  // Split by newlines to respect \n
+  const parts = formattedText.split("\n");
+  
+  for (let i = 0; i < parts.length; i++) {
+    const isLastPart = (i === parts.length - 1);
+    const partText = parts[i];
+    
+    // For intermediate parts, they must end with a newline.
+    // For the last part, it respects the passed 'newline' argument.
+    const partNewline = isLastPart ? newline : true;
+    
+    if (!lastLineEndedWithNewline && 
+        consoleOutput.lastChild && 
+        consoleOutput.lastChild.nodeType === Node.ELEMENT_NODE &&
+        consoleOutput.lastChild.classList.contains(`${type}-line`)) {
+      consoleOutput.lastChild.textContent += partText;
+    } else {
+      const line = document.createElement("div");
+      line.className = `console-line ${type}-line`;
+      line.textContent = partText;
+      consoleOutput.appendChild(line);
+    }
+    
+    lastLineEndedWithNewline = partNewline;
+  }
+  
+  consoleOutput.scrollTop = consoleOutput.scrollHeight;
+}
+
+function clearHighlight() {
+  if (currentHighlightedNodeId) {
+    const el = document.querySelector(`.node-group[data-id="${currentHighlightedNodeId}"]`);
+    if (el) {
+      el.classList.remove("executing");
+      el.classList.remove("executing-error");
+    }
+    currentHighlightedNodeId = null;
+  }
+}
+
+function highlightNode(nodeId) {
+  clearHighlight();
+  currentHighlightedNodeId = nodeId;
+  const el = document.querySelector(`.node-group[data-id="${nodeId}"]`);
+  if (el) {
+    el.classList.add("executing");
+  }
+}
+
+function highlightErrorNode(nodeId) {
+  clearHighlight();
+  currentHighlightedNodeId = nodeId;
+  const el = document.querySelector(`.node-group[data-id="${nodeId}"]`);
+  if (el) {
+    el.classList.add("executing-error");
+  }
+}
+
+function updateControls() {
+  const runBtn = document.getElementById("run-btn");
+  const pauseBtn = document.getElementById("pause-btn");
+  const stepBtn = document.getElementById("step-btn");
+  const stopBtn = document.getElementById("stop-btn");
+  const isInputWaiting = isWaitingForInput;
+
+  const prevHTML = runBtn.innerHTML;
+
+  if (!interpreter || !interpreter.isRunning) {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '<i data-lucide="play"></i> Run';
+    pauseBtn.disabled = true;
+    stepBtn.disabled = false;
+    stopBtn.disabled = true;
+  } else if (isInputWaiting) {
+    runBtn.disabled = true;
+    pauseBtn.disabled = true;
+    stepBtn.disabled = true;
+    stopBtn.disabled = false;
+  } else if (isStepMode) {
+    runBtn.disabled = false;
+    runBtn.innerHTML = '<i data-lucide="play"></i> Resume';
+    pauseBtn.disabled = true;
+    stepBtn.disabled = false;
+    stopBtn.disabled = false;
+  } else {
+    runBtn.disabled = true;
+    pauseBtn.disabled = false;
+    stepBtn.disabled = true;
+    stopBtn.disabled = false;
+  }
+
+  if (runBtn.innerHTML !== prevHTML && window.lucide) {
+    window.lucide.createIcons({ node: runBtn });
+  }
+}
+
+function pauseAutoRunTimer() {
+  if (autoRunTimer) {
+    clearTimeout(autoRunTimer);
+    autoRunTimer = null;
+  }
+}
+
+function stopExecution() {
+  pauseAutoRunTimer();
+  if (interpreter) {
+    interpreter.isRunning = false;
+  }
+  interpreter = null;
+  generator = null;
+  clearHighlight();
+  isWaitingForInput = false;
+
+  // Disable any active inline inputs
+  document.querySelectorAll(".inline-console-input").forEach(input => {
+    input.disabled = true;
+    input.placeholder = "Execution stopped";
+  });
+
+  updateControls();
+}
+
+function pauseExecution() {
+  pauseAutoRunTimer();
+  isStepMode = true;
+  logToConsole("Execution paused.", "system");
+  updateControls();
+}
+
+function startExecution() {
+  if (!interpreter || !interpreter.isRunning) {
+    interpreter = new FlowchartInterpreter(appState.procedures, evaluator);
+    generator = interpreter.start();
+    lastLineEndedWithNewline = true;
+    logToConsole("Program execution started.", "system");
+
+    switchSidebarPane("terminal");
+  }
+
+  isStepMode = false;
+  runStep();
+}
+
+function scheduleNextStep() {
+  if (isStepMode) {
+    updateControls();
+    return;
+  }
+
+  const speedSlider = document.getElementById("speed-slider");
+  const delay = parseInt(speedSlider.value, 10);
+
+  pauseAutoRunTimer();
+  autoRunTimer = setTimeout(() => {
+    runStep();
+  }, delay);
+
+  updateControls();
+}
+
+async function runStep(inputValue = undefined) {
+  if (!interpreter || !interpreter.isRunning) return;
+
+  try {
+    let result;
+    if (inputValue !== undefined) {
+      result = generator.next(inputValue);
+    } else {
+      result = generator.next();
+    }
+
+    if (result.done) {
+      logToConsole("Program execution finished.", "system");
+      stopExecution();
+      return;
+    }
+
+    const action = result.value;
+    if (!action) {
+      scheduleNextStep();
+      return;
+    }
+
+    // Sync screen if step is in a different subroutine
+    const frame = interpreter.getCurrentFrame();
+    if (frame && frame.procedureName !== appState.activeScreen) {
+      appState.activeScreen = frame.procedureName;
+      render(appState, "structure");
+    }
+
+    switch (action.type) {
+      case "HIGHLIGHT":
+        highlightNode(action.nodeId);
+        scheduleNextStep();
+        break;
+
+      case "OUTPUT":
+        let outText;
+        if (typeof action.value === "object" && action.value !== null) {
+          outText = JSON.stringify(action.value);
+        } else {
+          outText = String(action.value !== undefined ? action.value : "");
+        }
+        logToConsole(outText, "output", action.newline !== false);
+        scheduleNextStep();
+        break;
+
+      case "INPUT":
+        highlightNode(action.nodeId);
+        pauseAutoRunTimer();
+        showTerminalInput(action.variable);
+        break;
+
+      case "END":
+        logToConsole("Program terminated at End block.", "system");
+        stopExecution();
+        break;
+
+      case "ERROR":
+        highlightErrorNode(action.nodeId);
+        logToConsole(`Runtime Error: ${action.error}`, "error");
+        stopExecution();
+        break;
+
+      default:
+        scheduleNextStep();
+    }
+  } catch (err) {
+    logToConsole(`Execution terminated due to unexpected error: ${err.message}`, "error");
+    stopExecution();
+  }
+}
+
+function showTerminalInput(varName) {
+  switchSidebarPane("terminal");
+  isWaitingForInput = true;
+
+  // Create inline input container line
+  const inputPromptLine = document.createElement("div");
+  inputPromptLine.className = "console-line input-prompt-line";
+
+  const promptSpan = document.createElement("span");
+  promptSpan.className = "inline-prompt";
+  promptSpan.textContent = `${varName} = `;
+
+  const inlineInput = document.createElement("input");
+  inlineInput.type = "text";
+  inlineInput.className = "inline-console-input";
+  inlineInput.autocomplete = "off";
+
+  inputPromptLine.appendChild(promptSpan);
+  inputPromptLine.appendChild(inlineInput);
+
+  consoleOutput.appendChild(inputPromptLine);
+  
+  // Smooth scroll to bottom
+  consoleOutput.scrollTop = consoleOutput.scrollHeight;
+  
+  // Focus the input
+  inlineInput.focus();
+
+  inlineInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      const val = inlineInput.value;
+      
+      // Replace input element with static value text
+      const valSpan = document.createElement("span");
+      valSpan.className = "inline-value";
+      valSpan.textContent = val;
+      
+      inputPromptLine.removeChild(inlineInput);
+      inputPromptLine.appendChild(valSpan);
+      
+      isWaitingForInput = false;
+      
+      // Resume interpreter step
+      runStep(val);
+    }
+  });
+
+  updateControls();
+}
 
 /**
  * Initialize Event Listeners
@@ -165,6 +488,91 @@ function init() {
     }
   }
 
+  // 8. Sidebar Tab Event Listeners
+  sidebarTabProperties.addEventListener("click", () => {
+    switchSidebarPane("properties");
+  });
+  sidebarTabTerminal.addEventListener("click", () => {
+    switchSidebarPane("terminal");
+  });
+  
+  document.getElementById("run-btn").addEventListener("click", startExecution);
+  
+  document.getElementById("pause-btn").addEventListener("click", pauseExecution);
+  
+  document.getElementById("step-btn").addEventListener("click", () => {
+    isStepMode = true;
+    if (!interpreter || !interpreter.isRunning) {
+      interpreter = new FlowchartInterpreter(appState.procedures, evaluator);
+      generator = interpreter.start();
+      logToConsole("Program execution started (stepping).", "system");
+      switchSidebarPane("terminal");
+    }
+    runStep();
+  });
+  
+  document.getElementById("stop-btn").addEventListener("click", () => {
+    logToConsole("Program execution stopped.", "system");
+    stopExecution();
+  });
+  
+  document.getElementById("clear-console-btn").addEventListener("click", () => {
+    consoleOutput.innerHTML = '<div class="console-line system-line">Flowchart Studio Terminal. Press "Run" to execute diagram.</div>';
+    lastLineEndedWithNewline = true;
+  });
+  
+  const speedSlider = document.getElementById("speed-slider");
+  const speedVal = document.querySelector(".speed-val");
+  speedSlider.addEventListener("input", () => {
+    speedVal.textContent = `${speedSlider.value}ms`;
+  });
+  
+
+
+  // 9. Sidebar Legend Toggle Event Listener
+  const legendPanel = document.getElementById("sidebar-legend-panel");
+  const toggleLegendBtn = document.getElementById("toggle-legend-btn");
+  if (legendPanel && toggleLegendBtn) {
+    toggleLegendBtn.addEventListener("click", (e) => {
+      e.stopPropagation(); // Prevent bubbling
+      legendPanel.classList.toggle("collapsed");
+    });
+  }
+
+  // 10. Sidebar Resize Drag Listener
+  const resizer = document.getElementById("sidebar-resizer");
+  let isResizing = false;
+
+  if (resizer) {
+    resizer.addEventListener("mousedown", (e) => {
+      isResizing = true;
+      document.body.classList.add("is-resizing");
+      resizer.classList.add("is-resizing");
+      e.preventDefault(); // Disable text selection during drag
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!isResizing) return;
+      
+      const minW = 260;
+      const maxW = Math.min(600, window.innerWidth * 0.5);
+      const newWidth = Math.max(minW, Math.min(maxW, e.clientX));
+      
+      document.documentElement.style.setProperty('--sidebar-width', `${newWidth}px`);
+      
+      // Update SVG viewBox dynamically so layout updates size seamlessly
+      updateViewBox();
+    });
+
+    window.addEventListener("mouseup", () => {
+      if (isResizing) {
+        isResizing = false;
+        document.body.classList.remove("is-resizing");
+        resizer.classList.remove("is-resizing");
+      }
+    });
+  }
+
   // Initialize Lucide Icons
   lucide.createIcons();
 
@@ -205,6 +613,14 @@ function refreshSVGOnly() {
 
   // Sync SVG Viewbox bounds
   updateViewBox();
+
+  // Re-apply execution highlight if interpreter is running
+  if (interpreter && interpreter.isRunning && currentHighlightedNodeId) {
+    const el = document.querySelector(`.node-group[data-id="${currentHighlightedNodeId}"]`);
+    if (el) {
+      el.classList.add("executing");
+    }
+  }
 }
 
 /**
@@ -584,7 +1000,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-expression">Return Value / Expression</label>
-          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total, 0, or x + y" value="${node.expression || ''}">
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total, 0, or x + y" value="${escapeHtml(node.expression || '')}">
           <small class="form-help">Enter the value or expression to return (optional).</small>
         </div>
       `;
@@ -595,7 +1011,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-variable">Variable Name</label>
-          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., age" value="${node.variable || ''}">
+          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., age" value="${escapeHtml(node.variable || '')}">
           <small class="form-help">Enter the variable to store the user's input.</small>
         </div>
       `;
@@ -606,8 +1022,12 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-expression">Expression / Message</label>
-          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., &quot;Hello &quot; &amp; name" value="${node.expression || ''}">
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., &quot;Hello &quot; &amp; name" value="${escapeHtml(node.expression || '')}">
           <small class="form-help">Variables or strings wrapped in quotes (e.g., "Hello").</small>
+        </div>
+        <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-top: 12px; cursor: pointer; user-select: none;">
+          <input type="checkbox" id="inspect-newline" style="width: 16px; height: 16px; accent-color: #38bdf8; cursor: pointer;" ${node.newline !== false ? 'checked' : ''}>
+          <label for="inspect-newline" style="margin-bottom: 0; cursor: pointer; color: var(--text-main); font-size: 0.85rem;">New Line</label>
         </div>
       `;
       break;
@@ -617,11 +1037,11 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-variable">Variable</label>
-          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., total" value="${node.variable || ''}">
+          <input type="text" id="inspect-variable" class="form-control" placeholder="e.g., total" value="${escapeHtml(node.variable || '')}">
         </div>
         <div class="form-group">
           <label for="inspect-expression">Value / Expression</label>
-          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total + price" value="${node.expression || ''}">
+          <input type="text" id="inspect-expression" class="form-control" placeholder="e.g., total + price" value="${escapeHtml(node.expression || '')}">
         </div>
       `;
       break;
@@ -654,7 +1074,7 @@ function renderInspector() {
         </div>
         <div class="form-group">
           <label for="inspect-arguments">Arguments</label>
-          <input type="text" id="inspect-arguments" class="form-control" placeholder="e.g., score, 10" value="${node.arguments || ''}">
+          <input type="text" id="inspect-arguments" class="form-control" placeholder="e.g., score, 10" value="${escapeHtml(node.arguments || '')}">
           <small class="form-help">Separate multiple arguments with commas.</small>
         </div>
       `;
@@ -666,7 +1086,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-condition">Condition Statement</label>
-          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &gt;= 10" value="${node.condition || ''}">
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &gt;= 10" value="${escapeHtml(node.condition || '')}">
           <small class="form-help">Must evaluate to a boolean (e.g., count &lt; limit).</small>
         </div>
       `;
@@ -677,7 +1097,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-condition">Loop Condition</label>
-          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &lt; 5" value="${node.condition || ''}">
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., x &lt; 5" value="${escapeHtml(node.condition || '')}">
         </div>
       `;
       break;
@@ -687,7 +1107,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-condition">Loop Condition</label>
-          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., flag == true" value="${node.condition || ''}">
+          <input type="text" id="inspect-condition" class="form-control" placeholder="e.g., flag == true" value="${escapeHtml(node.condition || '')}">
         </div>
       `;
       break;
@@ -697,7 +1117,7 @@ function renderInspector() {
       fieldsHtml = `
         <div class="form-group">
           <label for="inspect-note-text">Note Content</label>
-          <textarea id="inspect-note-text" class="form-control" rows="6" placeholder="Write your note here...">${node.text || ''}</textarea>
+          <textarea id="inspect-note-text" class="form-control" rows="6" placeholder="Write your note here...">${escapeHtml(node.text || '')}</textarea>
         </div>
       `;
       break;
@@ -741,6 +1161,12 @@ function renderInspector() {
   if (exprInput) {
     exprInput.addEventListener("input", (e) => {
       updateNodeProperty(node.id, "expression", e.target.value);
+    });
+  }
+  const newlineInput = document.getElementById("inspect-newline");
+  if (newlineInput) {
+    newlineInput.addEventListener("change", (e) => {
+      updateNodeProperty(node.id, "newline", e.target.checked);
     });
   }
   if (condInput) {
@@ -997,6 +1423,20 @@ async function handleExportPDF() {
       clonedSvg.setAttribute("height", exportH);
       clonedSvg.setAttribute("viewBox", `${bbox.x - padding} ${bbox.y - padding} ${exportW} ${exportH}`);
       
+      // Remove grid and insert solid white background rectangle for printable look
+      const gridRect = clonedSvg.querySelector('rect[fill="url(#grid)"]');
+      if (gridRect) {
+        gridRect.remove();
+      }
+
+      const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      bgRect.setAttribute("x", bbox.x - padding);
+      bgRect.setAttribute("y", bbox.y - padding);
+      bgRect.setAttribute("width", exportW);
+      bgRect.setAttribute("height", exportH);
+      bgRect.setAttribute("fill", "#ffffff");
+      clonedSvg.insertBefore(bgRect, clonedSvg.firstChild);
+      
       // Remove zoom and pan transform from content group in cloned SVG
       const clonedContentGroup = clonedSvg.querySelector("#flowchart-content");
       if (clonedContentGroup) {
@@ -1010,7 +1450,7 @@ async function handleExportPDF() {
       clonedSvg.querySelectorAll(".note-resize-handle").forEach(el => el.remove());
 
       // Embed styling rules directly inside the SVG
-      // Using static CSS declarations to guarantee no external CORS network requests, preventing canvas tainting
+      // Injects high-contrast document styles optimized for a white background
       const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
       styleEl.textContent = `
         .node-group {
@@ -1020,27 +1460,29 @@ async function handleExportPDF() {
           stroke-width: 1.5px;
         }
         /* Node specific fills */
-        [data-type="start"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
-        [data-type="end"] .node-shape { fill: url(#grad-end); stroke: rgba(248, 113, 113, 0.4); }
-        [data-type="return"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
-        [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: rgba(96, 165, 250, 0.4); }
-        [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: rgba(167, 139, 250, 0.4); }
-        [data-type="call"] .node-shape { fill: url(#grad-call); stroke: rgba(244, 114, 182, 0.4); }
-        [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: rgba(251, 146, 60, 0.4); }
-        [data-type="note"] .node-shape { fill: rgba(250, 204, 21, 0.06); stroke: rgba(250, 204, 21, 0.3); }
+        [data-type="start"] .node-shape { fill: url(#grad-start); stroke: #047857; }
+        [data-type="end"] .node-shape { fill: url(#grad-end); stroke: #be123c; }
+        [data-type="return"] .node-shape { fill: url(#grad-start); stroke: #047857; }
+        [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: #0369a1; }
+        [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: #5b21b6; }
+        [data-type="call"] .node-shape { fill: url(#grad-call); stroke: #be185d; }
+        [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: #b45309; }
+        
+        /* Sticky Note - light yellow background with dark brown text */
+        [data-type="note"] .node-shape { fill: #fef9c3; stroke: #eab308; }
 
-        /* Flowlines */
+        /* Flowlines - dark slate for high contrast printing */
         .flowline {
-          stroke: rgba(148, 163, 184, 0.35);
+          stroke: #475569;
           stroke-width: 2.5px;
           stroke-linecap: round;
           fill: none;
         }
         .flowline-arrow {
-          fill: rgba(148, 163, 184, 0.35);
+          fill: #475569;
         }
         .loop-back-line {
-          stroke: rgba(148, 163, 184, 0.35);
+          stroke: #475569;
           stroke-width: 2.5px;
           stroke-dasharray: 4 3;
           fill: none;
@@ -1053,8 +1495,15 @@ async function handleExportPDF() {
           justify-content: center;
           align-items: center;
           height: 100%;
-          color: white;
+          color: #ffffff;
           text-align: center;
+          font-family: system-ui, -apple-system, sans-serif;
+        }
+        .note-text-container {
+          color: #451a03;
+          font-size: 0.8rem;
+          line-height: 1.4;
+          word-break: break-word;
           font-family: system-ui, -apple-system, sans-serif;
         }
         .node-type {
@@ -1062,12 +1511,12 @@ async function handleExportPDF() {
           text-transform: uppercase;
           font-weight: 700;
           letter-spacing: 0.05em;
-          opacity: 0.75;
+          opacity: 0.8;
           margin-bottom: 2px;
         }
         .node-expression {
           font-size: 0.85rem;
-          font-weight: 500;
+          font-weight: 600;
           font-family: monospace;
           width: 100%;
           overflow: hidden;
@@ -1080,7 +1529,7 @@ async function handleExportPDF() {
         [data-type="while"] .node-expression,
         [data-type="do-while"] .node-expression {
           font-size: 0.78rem;
-          font-weight: 500;
+          font-weight: 600;
           max-width: 120px;
           white-space: normal;
           word-break: break-all;
@@ -1093,22 +1542,15 @@ async function handleExportPDF() {
         .line-label {
           font-family: system-ui, -apple-system, sans-serif;
           font-size: 0.75rem;
-          font-weight: 600;
-          fill: #94a3b8;
+          font-weight: 700;
+          fill: #475569;
         }
-        .line-label.true-label { fill: #34d399; }
-        .line-label.false-label { fill: #f87171; }
+        .line-label.true-label { fill: #059669; }
+        .line-label.false-label { fill: #dc2626; }
 
         /* Sticky note specifics */
         .note-drag-handle {
-          fill: rgba(250, 204, 21, 0.12);
-        }
-        .note-text-container {
-          color: #fef08a;
-          font-size: 0.8rem;
-          line-height: 1.4;
-          word-break: break-word;
-          font-family: system-ui, -apple-system, sans-serif;
+          fill: rgba(234, 179, 8, 0.15);
         }
       `;
       clonedSvg.insertBefore(styleEl, clonedSvg.firstChild);
@@ -1138,8 +1580,8 @@ async function handleExportPDF() {
       ctx.imageSmoothingEnabled = true;
       ctx.imageSmoothingQuality = "high";
       
-      // Fill canvas background to preserve the premium slate-900 look
-      ctx.fillStyle = "#0f172a";
+      // Fill canvas background with clean white for printing
+      ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       
       // Draw the scaled SVG image onto canvas
@@ -1211,12 +1653,20 @@ function handleExportSVG() {
     clonedSvg.setAttribute("height", exportH);
     clonedSvg.setAttribute("viewBox", `${bbox.x - padding} ${bbox.y - padding} ${exportW} ${exportH}`);
     
-    // Remove the infinite grid background rect to make it transparent
+    // Remove grid and insert solid white background rectangle for printable look
     const gridRect = clonedSvg.querySelector('rect[fill="url(#grid)"]');
     if (gridRect) {
       gridRect.remove();
     }
 
+    const bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    bgRect.setAttribute("x", bbox.x - padding);
+    bgRect.setAttribute("y", bbox.y - padding);
+    bgRect.setAttribute("width", exportW);
+    bgRect.setAttribute("height", exportH);
+    bgRect.setAttribute("fill", "#ffffff");
+    clonedSvg.insertBefore(bgRect, clonedSvg.firstChild);
+    
     // Remove zoom and pan transform from content group in cloned SVG
     const clonedContentGroup = clonedSvg.querySelector("#flowchart-content");
     if (clonedContentGroup) {
@@ -1230,6 +1680,7 @@ function handleExportSVG() {
     clonedSvg.querySelectorAll(".note-resize-handle").forEach(el => el.remove());
 
     // Embed styling rules directly inside the SVG
+    // Injects high-contrast document styles optimized for a white background
     const styleEl = document.createElementNS("http://www.w3.org/2000/svg", "style");
     styleEl.textContent = `
       .node-group {
@@ -1239,27 +1690,29 @@ function handleExportSVG() {
         stroke-width: 1.5px;
       }
       /* Node specific fills */
-      [data-type="start"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
-      [data-type="end"] .node-shape { fill: url(#grad-end); stroke: rgba(248, 113, 113, 0.4); }
-      [data-type="return"] .node-shape { fill: url(#grad-start); stroke: rgba(52, 211, 153, 0.4); }
-      [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: rgba(96, 165, 250, 0.4); }
-      [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: rgba(167, 139, 250, 0.4); }
-      [data-type="call"] .node-shape { fill: url(#grad-call); stroke: rgba(244, 114, 182, 0.4); }
-      [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: rgba(251, 146, 60, 0.4); }
-      [data-type="note"] .node-shape { fill: rgba(250, 204, 21, 0.06); stroke: rgba(250, 204, 21, 0.3); }
+      [data-type="start"] .node-shape { fill: url(#grad-start); stroke: #047857; }
+      [data-type="end"] .node-shape { fill: url(#grad-end); stroke: #be123c; }
+      [data-type="return"] .node-shape { fill: url(#grad-start); stroke: #047857; }
+      [data-type="input"] .node-shape, [data-type="output"] .node-shape { fill: url(#grad-io); stroke: #0369a1; }
+      [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: #5b21b6; }
+      [data-type="call"] .node-shape { fill: url(#grad-call); stroke: #be185d; }
+      [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: #b45309; }
+      
+      /* Sticky Note - light yellow background with dark brown text */
+      [data-type="note"] .node-shape { fill: #fef9c3; stroke: #eab308; }
 
-      /* Flowlines */
+      /* Flowlines - dark slate for high contrast printing */
       .flowline {
-        stroke: rgba(148, 163, 184, 0.35);
+        stroke: #475569;
         stroke-width: 2.5px;
         stroke-linecap: round;
         fill: none;
       }
       .flowline-arrow {
-        fill: rgba(148, 163, 184, 0.35);
+        fill: #475569;
       }
       .loop-back-line {
-        stroke: rgba(148, 163, 184, 0.35);
+        stroke: #475569;
         stroke-width: 2.5px;
         stroke-dasharray: 4 3;
         fill: none;
@@ -1272,8 +1725,15 @@ function handleExportSVG() {
         justify-content: center;
         align-items: center;
         height: 100%;
-        color: white;
+        color: #ffffff;
         text-align: center;
+        font-family: system-ui, -apple-system, sans-serif;
+      }
+      .note-text-container {
+        color: #451a03;
+        font-size: 0.8rem;
+        line-height: 1.4;
+        word-break: break-word;
         font-family: system-ui, -apple-system, sans-serif;
       }
       .node-type {
@@ -1281,12 +1741,12 @@ function handleExportSVG() {
         text-transform: uppercase;
         font-weight: 700;
         letter-spacing: 0.05em;
-        opacity: 0.75;
+        opacity: 0.8;
         margin-bottom: 2px;
       }
       .node-expression {
         font-size: 0.85rem;
-        font-weight: 500;
+        font-weight: 600;
         font-family: monospace;
         width: 100%;
         overflow: hidden;
@@ -1299,7 +1759,7 @@ function handleExportSVG() {
       [data-type="while"] .node-expression,
       [data-type="do-while"] .node-expression {
         font-size: 0.78rem;
-        font-weight: 500;
+        font-weight: 600;
         max-width: 120px;
         white-space: normal;
         word-break: break-all;
@@ -1312,22 +1772,15 @@ function handleExportSVG() {
       .line-label {
         font-family: system-ui, -apple-system, sans-serif;
         font-size: 0.75rem;
-        font-weight: 600;
-        fill: #94a3b8;
+        font-weight: 700;
+        fill: #475569;
       }
-      .line-label.true-label { fill: #34d399; }
-      .line-label.false-label { fill: #f87171; }
+      .line-label.true-label { fill: #059669; }
+      .line-label.false-label { fill: #dc2626; }
 
       /* Sticky note specifics */
       .note-drag-handle {
-        fill: rgba(250, 204, 21, 0.12);
-      }
-      .note-text-container {
-        color: #fef08a;
-        font-size: 0.8rem;
-        line-height: 1.4;
-        word-break: break-word;
-        font-family: system-ui, -apple-system, sans-serif;
+        fill: rgba(234, 179, 8, 0.15);
       }
     `;
     clonedSvg.insertBefore(styleEl, clonedSvg.firstChild);
@@ -1356,6 +1809,7 @@ function handleExportSVG() {
 }
 
 function handleImport(e) {
+  stopExecution();
   const file = e.target.files[0];
   if (!file) return;
 
@@ -1371,6 +1825,7 @@ function handleImport(e) {
 
 function handleClear() {
   if (confirm("Are you sure you want to clear all flowchart screens? This will reset the workspace.")) {
+    stopExecution();
     clearState();
     zoomToFit();
   }

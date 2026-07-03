@@ -8,6 +8,8 @@ For a complete breakdown of requirements and architecture, refer to the [Project
 
 - **Structural Editing:** Blocks are inserted directly into flowlines via interactive hitzones, preserving execution flow validity.
 - **Visual Design & Layout:** Automatic recursive layout calculation that formats complex nested logic (conditionals, loops) dynamically.
+- **Interactive Execution Engine:** Run flowcharts step-by-step or automatically with adjustable delay speed. Highlights the currently running block with an animated emerald glow, and errors with a red warning state.
+- **Embedded Sidebar Console:** A dark-themed terminal console embedded directly in the left sidebar (tab-switchable with the node properties inspector) displaying color-coded lines: green for outputs, yellow for inputs (prompts user for input values directly in the console), and red for runtime evaluation errors.
 - **Standard Flow Elements Supported:**
   - **Sequential:** Input/Output, Assignment, Call blocks.
   - **Control Flow:** Start, End, Return capsules; If-Else diamonds; While and Do-While loops.
@@ -24,6 +26,8 @@ For a complete breakdown of requirements and architecture, refer to the [Project
   - `web/index.html` - The application user interface.
   - `web/index.css` - Custom styling and design tokens.
   - `web/js/app.js` - Application logic, state binding, and event handling.
+  - `web/js/evaluator.js` - Pluggable expression evaluation engine.
+  - `web/js/interpreter.js` - Generator-based step-by-step flowchart execution engine.
   - `web/js/layout.js` - Layout arithmetic and SVG generation.
   - `web/js/state.js` - Redux-like flowchart state manager.
 - `server.js` - Node.js local development server.
