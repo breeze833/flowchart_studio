@@ -2,7 +2,7 @@
 
 Flowchart Studio is a lightweight, visual flowchart editor built using pure client-side web technologies. Unlike free-form flowchart tools where nodes are manually positioned and connected, Flowchart Studio uses a **structural layout model**. Flow elements are inserted directly into existing flowlines, guaranteeing that the resulting diagram remains syntactically valid and readable at all times.
 
-For a complete breakdown of requirements and architecture, refer to the [Project Specification](./doc/spec.md).
+For a complete breakdown of requirements and architecture, refer to the documents in the `doc/` folder.
 
 ## Core Features
 
