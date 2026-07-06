@@ -38,6 +38,11 @@ To make flowcharts executable while maintaining a clean workspace, the following
   * <span style="color: #10b981">Emerald Green</span>: Program output strings.
   * <span style="color: #ef4444">Bright Crimson Red</span>: Runtime expression errors and stack crashes.
 
+### Floating Variable Watcher
+*   **Stack Tracking**: A glassmorphism panel floating in the upper-right corner of the canvas shows the call stack vertically, listing local variables and parameters.
+*   **Active Highlights**: Highlights the active subroutine frame (the top of the stack) in emerald green, while parent frames are slightly dimmed.
+*   **Auto-Scrolling**: Automatically scrolls vertically to keep the newly added stack frame visible when the call stack grows deep.
+
 ---
 
 ## 3. Variable Handling & Name Shadowing
@@ -49,7 +54,8 @@ Every procedure execution (including `main`) is pushed as a frame onto a private
 ```javascript
 this.callStack.push({
   procedureName: name,
-  localScope: localScope // Contains local parameters and variables
+  localScope: localScope,
+  arguments: argValues // Store the initial evaluated arguments list
 });
 ```
 
@@ -65,6 +71,7 @@ this.callStack.push({
 The evaluation of expressions (such as assignments, loops, and conditions) is performed using the `JSExpressionEvaluator`:
 
 * **JavaScript Syntax:** Expression strings (e.g. `x > 5`, `"Count: " + count`) are evaluated using a sandboxed JavaScript context mapped against the active local frame scope.
+* **Asynchronous Subroutine Tracing:** If an expression contains custom function calls (e.g., `calculate(x) + 1`), the evaluator automatically compiles it into an `AsyncFunction` context, rewriting identifiers (e.g. `await calculate(x) + 1`). This allows the execution engine to trace into the subroutine, highlighting its nodes and handling step delays/inputs asynchronously.
 * **HTML Input Escaping:** When rendering node values in the properties panel, all values are wrapped in `escapeHtml()` helper calls:
   ```javascript
   value="${escapeHtml(node.expression || '')}"
@@ -81,12 +88,12 @@ Running step-by-step executions at adjustable speeds without freezing the browse
 The interpreter uses a JavaScript Generator (`function*`) to walk the flowchart block lists. 
 Each execution step pauses at a block, yields its action, and awaits the next trigger:
 ```javascript
-// Example: While block iteration yields highlights to allow UI rendering
+// Example: While block iteration yields highlights and supports async expressions
 while (true) {
   yield { type: "HIGHLIGHT", nodeId: node.id };
-  const cond = this.evaluator.evaluate(node.condition, this.getCurrentScope());
+  const cond = yield* this.evaluateExpression(node.condition, freshScope);
   if (!cond) break;
-  yield* this.executeBlockList(node.loopBody);
+  yield* this.executeBlockList(node.loopBody || []);
 }
 ```
 

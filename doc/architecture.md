@@ -76,8 +76,8 @@ To support loading exported diagrams into standard vector software (such as GIMP
 ## 4. Export Pipelines
 
 - **JSON Export**: Downloads the entire application state (all procedures, parameters, body ASTs, and sticky notes) as a JSON backup file.
-- **PDF Export**: Swaps procedures in the background to calculate bounds for each diagram, rendering every flow to a dedicated, custom-sized page in a single consolidated PDF document. Edit helpers (hitzone buttons and resize handles) are removed from the DOM prior to canvas generation, and canvas rendering is base64-encoded to prevent origin taints.
-- **SVG Export**: Exports the active procedure screen as a standalone, portable, transparent-background SVG file, with styling rules embedded inline.
+- **PDF Export**: Swaps procedures in the background to calculate bounds for each diagram, rendering every flow to a dedicated, custom-sized page in a single consolidated PDF document. Temporary interactive overlays (hitzone buttons, note resize handles, and the floating Variable Watcher panel) are hidden prior to canvas generation, and canvas rendering is base64-encoded to prevent origin taints.
+- **SVG Export**: Exports the active procedure screen as a standalone, portable, transparent-background SVG file, with styling rules embedded inline. Interactive hitzones, note resize handles, and the Variable Watcher are temporarily hidden to clean up the exported vector graphic.
 
 ---
 

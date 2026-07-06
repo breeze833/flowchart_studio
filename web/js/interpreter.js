@@ -26,13 +26,32 @@ export class FlowchartInterpreter {
     return this.callStack[this.callStack.length - 1];
   }
 
-  /**
-   * Merges globalScope and current local frame scope for evaluation.
-   */
   getCurrentScope() {
     const frame = this.getCurrentFrame();
     const local = frame ? frame.localScope : {};
-    return { _result: this.globalScope["_result"], ...local };
+    const scope = { _result: this.globalScope["_result"], ...local };
+
+    // Expose subroutines as helper functions in the scope
+    for (const name in this.procedures) {
+      if (name !== "main") {
+        scope[name] = async (...args) => {
+          return await this.executeProcedureAsync(name, args);
+        };
+      }
+    }
+
+    return scope;
+  }
+
+  /**
+   * Evaluates an expression, yielding control if the evaluation is asynchronous (Promise).
+   */
+  *evaluateExpression(expression, scope) {
+    let result = this.evaluator.evaluate(expression, scope);
+    if (result instanceof Promise) {
+      result = yield result;
+    }
+    return result;
   }
 
   /**
@@ -67,7 +86,8 @@ export class FlowchartInterpreter {
 
     this.callStack.push({
       procedureName: name,
-      localScope: localScope
+      localScope: localScope,
+      arguments: argValues
     });
 
     const body = proc.body || [];
@@ -75,6 +95,44 @@ export class FlowchartInterpreter {
 
     this.callStack.pop();
     return retVal;
+  }
+
+
+
+  /**
+   * Executes a procedure asynchronously.
+   * Drives the generator step-by-step and awaits action responses from the runner.
+   */
+  async executeProcedureAsync(name, argValues) {
+    const gen = this.executeProcedure(name, argValues);
+    let res = gen.next();
+    while (!res.done) {
+      if (!this.isRunning) {
+        break;
+      }
+      const action = res.value;
+      if (action) {
+        if (action instanceof Promise) {
+          try {
+            const val = await action;
+            res = gen.next(val);
+          } catch (err) {
+            res = gen.throw(err);
+          }
+          continue;
+        }
+
+        if (this.onAsyncAction) {
+          const val = await this.onAsyncAction(action);
+          res = gen.next(val);
+        } else {
+          res = gen.next();
+        }
+      } else {
+        res = gen.next();
+      }
+    }
+    return res.value;
   }
 
   /**
@@ -113,14 +171,14 @@ export class FlowchartInterpreter {
         case "return": {
           let retVal = undefined;
           if (node.expression && String(node.expression).trim() !== "") {
-            retVal = this.evaluator.evaluate(node.expression, currentScope);
+            retVal = yield* this.evaluateExpression(node.expression, currentScope);
           }
           return { type: "RETURN", value: retVal };
         }
 
         case "assignment": {
           const varName = String(node.variable).trim();
-          const value = this.evaluator.evaluate(node.expression, currentScope);
+          const value = yield* this.evaluateExpression(node.expression, currentScope);
           
           const frame = this.getCurrentFrame();
           if (frame) {
@@ -152,13 +210,13 @@ export class FlowchartInterpreter {
         }
 
         case "output": {
-          const value = this.evaluator.evaluate(node.expression, currentScope);
+          const value = yield* this.evaluateExpression(node.expression, currentScope);
           yield { type: "OUTPUT", value: value, newline: node.newline !== false };
           break;
         }
 
         case "if": {
-          const cond = this.evaluator.evaluate(node.condition, currentScope);
+          const cond = yield* this.evaluateExpression(node.condition, currentScope);
           if (cond) {
             const res = yield* this.executeBlockList(node.trueBranch || []);
             if (res && res.type === "RETURN") return res;
@@ -175,7 +233,7 @@ export class FlowchartInterpreter {
             yield { type: "HIGHLIGHT", nodeId: node.id };
 
             const freshScope = this.getCurrentScope();
-            const cond = this.evaluator.evaluate(node.condition, freshScope);
+            const cond = yield* this.evaluateExpression(node.condition, freshScope);
             if (!cond) break;
 
             const res = yield* this.executeBlockList(node.loopBody || []);
@@ -193,7 +251,7 @@ export class FlowchartInterpreter {
             yield { type: "HIGHLIGHT", nodeId: node.id };
 
             const freshScope = this.getCurrentScope();
-            const cond = this.evaluator.evaluate(node.condition, freshScope);
+            const cond = yield* this.evaluateExpression(node.condition, freshScope);
             if (!cond) break;
           }
           break;
@@ -204,7 +262,7 @@ export class FlowchartInterpreter {
           let argValues = [];
           if (node.arguments && String(node.arguments).trim() !== "") {
             // Evaluate arguments as a JS array expression
-            argValues = this.evaluator.evaluate(`[${node.arguments}]`, currentScope);
+            argValues = yield* this.evaluateExpression(`[${node.arguments}]`, currentScope);
             if (!Array.isArray(argValues)) {
               argValues = [argValues];
             }

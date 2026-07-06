@@ -3,6 +3,13 @@
  * Currently implements JavaScript-based expression parsing and assignment.
  */
 
+function rewriteExpression(expression, functionNames) {
+  if (functionNames.length === 0) return expression;
+  const escapedNames = functionNames.map(name => name.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|');
+  const regex = new RegExp(`\\b(${escapedNames})\\s*\\(`, 'g');
+  return expression.replace(regex, 'await $1(');
+}
+
 export class JSExpressionEvaluator {
   /**
    * Evaluates a string expression against a variable scope object.
@@ -19,11 +26,22 @@ export class JSExpressionEvaluator {
     const keys = Object.keys(scope);
     const values = Object.values(scope);
 
+    const functionNames = keys.filter(k => typeof scope[k] === 'function');
+    const hasFunctionCall = functionNames.some(name => {
+      const regex = new RegExp(`\\b${name}\\s*\\(`);
+      return regex.test(trimmedExpr);
+    });
+
     try {
-      // We construct a Function with the scope keys as arguments
-      // and call it passing the scope values.
-      const evaluatorFn = new Function(...keys, `return (${trimmedExpr});`);
-      return evaluatorFn(...values);
+      if (hasFunctionCall) {
+        const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+        const rewrittenExpr = rewriteExpression(trimmedExpr, functionNames);
+        const evaluatorFn = new AsyncFunction(...keys, `return (${rewrittenExpr});`);
+        return evaluatorFn(...values);
+      } else {
+        const evaluatorFn = new Function(...keys, `return (${trimmedExpr});`);
+        return evaluatorFn(...values);
+      }
     } catch (err) {
       throw new Error(`Evaluation Error in "${trimmedExpr}": ${err.message}`);
     }

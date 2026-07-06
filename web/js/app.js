@@ -101,6 +101,8 @@ let currentHighlightedNodeId = null;
 let isStepMode = false;
 let isWaitingForInput = false;
 let lastLineEndedWithNewline = true;
+let lastCallStackLength = 0;
+let resumeStepCallback = null;
 
 // DOM References for Sidebar Tabs and Panes
 const sidebarTabProperties = document.getElementById("sidebar-tab-properties");
@@ -123,6 +125,149 @@ function switchSidebarPane(activePaneName) {
     propertiesPane.classList.remove("active");
     terminalPane.classList.add("active");
   }
+}
+
+function formatWatcherValue(val) {
+  if (val === undefined) return "undefined";
+  if (val === null) return "null";
+  if (typeof val === "string") return `"${val}"`;
+  if (Array.isArray(val)) {
+    return `[${val.map(item => formatWatcherValue(item)).join(", ")}]`;
+  }
+  if (typeof val === "object") {
+    try {
+      return JSON.stringify(val);
+    } catch (e) {
+      return "[Object]";
+    }
+  }
+  return String(val);
+}
+
+function updateVariableWatcher() {
+  const watcherEl = document.getElementById("variable-watcher");
+  if (!watcherEl) return;
+
+  if (!interpreter || !interpreter.isRunning) {
+    watcherEl.style.display = "none";
+    lastCallStackLength = 0;
+    return;
+  }
+
+  watcherEl.style.display = "flex";
+
+  const stack = interpreter.callStack || [];
+  const currentLength = stack.length;
+
+  let html = `<div class="watcher-title">Variable Watcher</div>`;
+
+  stack.forEach((frame, idx) => {
+    const isActive = (idx === stack.length - 1);
+    const dimmedClass = isActive ? "" : "dimmed";
+    const activeClass = isActive ? "active" : "";
+    
+    // Format evaluated arguments
+    const args = frame.arguments || [];
+    const formattedArgs = args.map(val => formatWatcherValue(val)).join(", ");
+    const headerText = `${frame.procedureName}(${formattedArgs})`;
+
+    // Variables list
+    const vars = frame.localScope || {};
+    const varNames = Object.keys(vars);
+
+    let varsHtml = "";
+    if (varNames.length === 0) {
+      varsHtml = `<div class="watcher-empty-vars">No variables initialized yet</div>`;
+    } else {
+      varsHtml = `<div class="watcher-var-list">`;
+      varNames.forEach(varName => {
+        const val = vars[varName];
+        varsHtml += `
+          <div class="watcher-var-box">
+            <span class="watcher-var-name">${escapeHtml(varName)}</span>
+            <span class="watcher-var-value">${escapeHtml(formatWatcherValue(val))}</span>
+          </div>
+        `;
+      });
+      varsHtml += `</div>`;
+    }
+
+    html += `
+      <div class="watcher-func-call ${activeClass} ${dimmedClass}">
+        <div class="watcher-func-header">${escapeHtml(headerText)}</div>
+        ${varsHtml}
+      </div>
+    `;
+  });
+
+  watcherEl.innerHTML = html;
+
+  // Auto-scrolling to the bottom when stack length increases
+  if (currentLength > lastCallStackLength) {
+    watcherEl.scrollTop = watcherEl.scrollHeight;
+  }
+  lastCallStackLength = currentLength;
+}
+
+function createInterpreter() {
+  interpreter = new FlowchartInterpreter(appState.procedures, evaluator);
+
+  interpreter.onAsyncAction = async (action) => {
+    const frame = interpreter.getCurrentFrame();
+    if (frame && frame.procedureName !== appState.activeScreen) {
+      appState.activeScreen = frame.procedureName;
+      render(appState, "structure");
+    }
+
+    updateVariableWatcher();
+
+    switch (action.type) {
+      case "HIGHLIGHT":
+        highlightNode(action.nodeId);
+        updateControls();
+        
+        if (isStepMode) {
+          await new Promise(resolve => {
+            resumeStepCallback = resolve;
+          });
+        } else {
+          const speedSlider = document.getElementById("speed-slider");
+          const delay = parseInt(speedSlider.value, 10);
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+        break;
+
+      case "OUTPUT":
+        let outText;
+        if (typeof action.value === "object" && action.value !== null) {
+          outText = JSON.stringify(action.value);
+        } else {
+          outText = String(action.value !== undefined ? action.value : "");
+        }
+        logToConsole(outText, "output", action.newline !== false);
+        break;
+
+      case "INPUT":
+        highlightNode(action.nodeId);
+        pauseAutoRunTimer();
+        return await new Promise(resolve => {
+          showTerminalInput(action.variable, resolve);
+        });
+
+      case "END":
+        logToConsole("Program terminated at End block.", "system");
+        stopExecution();
+        break;
+
+      case "ERROR":
+        highlightErrorNode(action.nodeId);
+        logToConsole(`Runtime Error: ${action.error}`, "error");
+        stopExecution();
+        break;
+    }
+  };
+
+  return interpreter;
 }
 
 function logToConsole(text, type = "system", newline = true) {
@@ -241,6 +386,7 @@ function stopExecution() {
   generator = null;
   clearHighlight();
   isWaitingForInput = false;
+  resumeStepCallback = null;
 
   // Disable any active inline inputs
   document.querySelectorAll(".inline-console-input").forEach(input => {
@@ -249,6 +395,7 @@ function stopExecution() {
   });
 
   updateControls();
+  updateVariableWatcher();
 }
 
 function pauseExecution() {
@@ -260,7 +407,7 @@ function pauseExecution() {
 
 function startExecution() {
   if (!interpreter || !interpreter.isRunning) {
-    interpreter = new FlowchartInterpreter(appState.procedures, evaluator);
+    interpreter = createInterpreter();
     generator = interpreter.start();
     lastLineEndedWithNewline = true;
     logToConsole("Program execution started.", "system");
@@ -269,6 +416,15 @@ function startExecution() {
   }
 
   isStepMode = false;
+  updateControls();
+
+  if (resumeStepCallback) {
+    const cb = resumeStepCallback;
+    resumeStepCallback = null;
+    cb();
+    return;
+  }
+
   runStep();
 }
 
@@ -312,12 +468,28 @@ async function runStep(inputValue = undefined) {
       return;
     }
 
+    if (action instanceof Promise) {
+      action.then(resolvedVal => {
+        runStep(resolvedVal);
+      }).catch(err => {
+        try {
+          generator.throw(err);
+        } catch (unhandledErr) {
+          logToConsole(`Execution error: ${unhandledErr.message}`, "error");
+          stopExecution();
+        }
+      });
+      return;
+    }
+
     // Sync screen if step is in a different subroutine
     const frame = interpreter.getCurrentFrame();
     if (frame && frame.procedureName !== appState.activeScreen) {
       appState.activeScreen = frame.procedureName;
       render(appState, "structure");
     }
+
+    updateVariableWatcher();
 
     switch (action.type) {
       case "HIGHLIGHT":
@@ -362,7 +534,7 @@ async function runStep(inputValue = undefined) {
   }
 }
 
-function showTerminalInput(varName) {
+function showTerminalInput(varName, callback = null) {
   switchSidebarPane("terminal");
   isWaitingForInput = true;
 
@@ -405,7 +577,11 @@ function showTerminalInput(varName) {
       isWaitingForInput = false;
       
       // Resume interpreter step
-      runStep(val);
+      if (callback) {
+        callback(val);
+      } else {
+        runStep(val);
+      }
     }
   });
 
@@ -503,11 +679,21 @@ function init() {
   document.getElementById("step-btn").addEventListener("click", () => {
     isStepMode = true;
     if (!interpreter || !interpreter.isRunning) {
-      interpreter = new FlowchartInterpreter(appState.procedures, evaluator);
+      interpreter = createInterpreter();
       generator = interpreter.start();
       logToConsole("Program execution started (stepping).", "system");
       switchSidebarPane("terminal");
     }
+    
+    updateControls();
+    
+    if (resumeStepCallback) {
+      const cb = resumeStepCallback;
+      resumeStepCallback = null;
+      cb();
+      return;
+    }
+    
     runStep();
   });
   
@@ -1391,8 +1577,13 @@ async function handleExportPDF() {
   // Save the user's current screen and selection to restore later
   const originalScreen = appState.activeScreen;
   const originalSelectedNodeId = appState.selectedNodeId;
+  const watcherEl = document.getElementById("variable-watcher");
+  const prevWatcherDisplay = watcherEl ? watcherEl.style.display : "none";
 
   try {
+    if (watcherEl) {
+      watcherEl.style.display = "none";
+    }
     const procedureNames = Object.keys(appState.procedures);
     if (procedureNames.length === 0) return;
 
@@ -1621,6 +1812,10 @@ async function handleExportPDF() {
     appState.selectedNodeId = originalSelectedNodeId;
     render(appState, "structure");
 
+    if (watcherEl) {
+      watcherEl.style.display = prevWatcherDisplay;
+    }
+
     exportPdfBtn.innerHTML = originalText;
     exportPdfBtn.disabled = false;
     lucide.createIcons({ node: exportPdfBtn });
@@ -1628,13 +1823,18 @@ async function handleExportPDF() {
 }
 
 function handleExportSVG() {
+  const watcherEl = document.getElementById("variable-watcher");
+  const prevWatcherDisplay = watcherEl ? watcherEl.style.display : "none";
+  const originalSelectedNodeId = appState.selectedNodeId;
+
   try {
     const activeProc = appState.procedures[appState.activeScreen];
     if (!activeProc) return;
 
-    // Save user selection to restore later
-    const originalSelectedNodeId = appState.selectedNodeId;
-    
+    if (watcherEl) {
+      watcherEl.style.display = "none";
+    }
+
     // Clear selection so borders are not exported
     appState.selectedNodeId = null;
     refreshSVGOnly();
@@ -1798,13 +1998,17 @@ function handleExportSVG() {
     a.click();
     URL.revokeObjectURL(url);
 
+  } catch (error) {
+    console.error("SVG Export failed:", error);
+    alert("Export to SVG failed. See console for details.");
+  } finally {
     // Restore user state
     appState.selectedNodeId = originalSelectedNodeId;
     render(appState, "structure");
 
-  } catch (error) {
-    console.error("SVG Export failed:", error);
-    alert("Export to SVG failed. See console for details.");
+    if (watcherEl) {
+      watcherEl.style.display = prevWatcherDisplay;
+    }
   }
 }
 

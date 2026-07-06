@@ -77,7 +77,7 @@ The application interface is divided into three fixed layout panels:
      - **Import JSON** / **Export JSON**
      - **Export PDF** (creates multi-page documents, mapping each subroutine flow to a dedicated page sized to fit the diagram)
      - **Export SVG** (downloads the active procedure as a transparent vector SVG file)
-2. **SVG Viewport Canvas:** Handles scroll-zooming and click-drag panning by updating viewbox attributes.
+2. **SVG Viewport Canvas:** Handles scroll-zooming and click-drag panning by updating viewbox attributes. Includes a floating **Variable Watcher** panel in the upper-right corner that appears during active execution to track call stack frames and variables.
 3. **Inspector Panel:** Displays parameter controls for the `Start` block, expressions/variables for body blocks, and textareas for notes.
 
 ---
@@ -91,3 +91,4 @@ The application interface is divided into three fixed layout panels:
 * **Phase 5: Procedure Scope Switching** (Navigation bar tabs, multi-canvas tree isolation, custom subroutine builders).
 * **Phase 6: Floating Note Blocks** (Free text note creation, drag-pan coordinates, relative drag resizing).
 * **Phase 7: Vector Exports & Performance Optimization** (Native SVG text wrappers, multi-page PDF compilation, dynamic dependency lazy-loading, DOM-scoped icon updates).
+* **Phase 8: Debugger Variable Watcher & Async Subroutine Tracing** (Stack-frame argument capturing, real-time scrollable glassmorphism call-stack panel, `AsyncFunction` expression rewriting to support step-into subroutine tracing/debugging inside expressions).
