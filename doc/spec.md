@@ -30,6 +30,8 @@ Flowchart Studio is a client-side visual programming environment. Instead of dra
 | **If-Else** | Condition string, `true` branch, `false` branch | Diamond | Splits flow into two parallel paths, merging at a join point. |
 | **While Loop** | Condition string, loop body branch | Diamond | Enters nested body when true; loops back to header; exits straight down when false. |
 | **Do-While** | Condition string, loop body branch | Diamond | Evaluates body first, followed by bottom condition loop-back to body start. |
+| **Break** | None | Capsule (Orange) | Exits the innermost loop immediately. Single flowline inlet. |
+| **Continue** | None | Capsule (Teal) | Skips the rest of the loop body. Single flowline inlet. |
 | **Sticky Note** | Free text body | Rounded Square (Yellow) | Free-placement note box. Supports drag-to-pan, drag-to-resize, and text reflow. |
 
 ---
@@ -92,3 +94,4 @@ The application interface is divided into three fixed layout panels:
 * **Phase 6: Floating Note Blocks** (Free text note creation, drag-pan coordinates, relative drag resizing).
 * **Phase 7: Vector Exports & Performance Optimization** (Native SVG text wrappers, multi-page PDF compilation, dynamic dependency lazy-loading, DOM-scoped icon updates).
 * **Phase 8: Debugger Variable Watcher & Async Subroutine Tracing** (Stack-frame argument capturing, real-time scrollable glassmorphism call-stack panel, `AsyncFunction` expression rewriting to support step-into subroutine tracing/debugging inside expressions).
+* **Phase 9: Loop Control Interruptions** (Break & Continue block templates, context menu integration, colored capsule SVG rendering, bubble-up control flow execution in interpreter, and documentation updates).

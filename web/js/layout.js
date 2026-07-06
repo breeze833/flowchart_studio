@@ -101,7 +101,9 @@ export function calculateLayout(node, pathString = "") {
       layout.xAnchor = 90;
       break;
     }
-    case "end": {
+    case "end":
+    case "break":
+    case "continue": {
       layout.w = 180;
       layout.h = 50;
       layout.xAnchor = 90;
@@ -359,6 +361,32 @@ export function renderLayoutSVG(layout, selectedId) {
       });
       return `
         <g class="node-group ${selectedClass}" data-id="${layout.id}" data-type="end">
+          <rect x="${layout.x}" y="${layout.y}" width="${layout.w}" height="${layout.h}" rx="${layout.h / 2}" ry="${layout.h / 2}" class="node-shape" fill="${grad}" filter="url(#shadow)" />
+          ${textMarkup}
+        </g>
+      `;
+    }
+    case "break": {
+      const grad = "url(#grad-break)";
+      const textMarkup = renderSVGText(["BREAK"], center, layout.y + layout.h / 2, 14, {
+        fontSize: 13,
+        fontWeight: "bold"
+      });
+      return `
+        <g class="node-group ${selectedClass}" data-id="${layout.id}" data-type="break">
+          <rect x="${layout.x}" y="${layout.y}" width="${layout.w}" height="${layout.h}" rx="${layout.h / 2}" ry="${layout.h / 2}" class="node-shape" fill="${grad}" filter="url(#shadow)" />
+          ${textMarkup}
+        </g>
+      `;
+    }
+    case "continue": {
+      const grad = "url(#grad-continue)";
+      const textMarkup = renderSVGText(["CONTINUE"], center, layout.y + layout.h / 2, 14, {
+        fontSize: 13,
+        fontWeight: "bold"
+      });
+      return `
+        <g class="node-group ${selectedClass}" data-id="${layout.id}" data-type="continue">
           <rect x="${layout.x}" y="${layout.y}" width="${layout.w}" height="${layout.h}" rx="${layout.h / 2}" ry="${layout.h / 2}" class="node-shape" fill="${grad}" filter="url(#shadow)" />
           ${textMarkup}
         </g>

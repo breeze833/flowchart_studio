@@ -1297,6 +1297,14 @@ function renderInspector() {
         </div>
       `;
       break;
+    case "break":
+      title = "Break Block";
+      description = "Exits the innermost enclosing loop (While or Do-While) immediately.";
+      break;
+    case "continue":
+      title = "Continue Block";
+      description = "Skips the rest of the loop body and starts the next iteration check of the innermost enclosing loop.";
+      break;
     case "note":
       title = "Note Block";
       description = "A free-floating canvas note. Drag it by its header and resize it from the bottom-right grip.";
@@ -1658,6 +1666,8 @@ async function handleExportPDF() {
         [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: #5b21b6; }
         [data-type="call"] .node-shape { fill: url(#grad-call); stroke: #be185d; }
         [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: #b45309; }
+        [data-type="break"] .node-shape { fill: url(#grad-break); stroke: #ea580c; }
+        [data-type="continue"] .node-shape { fill: url(#grad-continue); stroke: #0f766e; }
         
         /* Sticky Note - light yellow background with dark brown text */
         [data-type="note"] .node-shape { fill: #fef9c3; stroke: #eab308; }
@@ -1897,6 +1907,8 @@ function handleExportSVG() {
       [data-type="assignment"] .node-shape { fill: url(#grad-assign); stroke: #5b21b6; }
       [data-type="call"] .node-shape { fill: url(#grad-call); stroke: #be185d; }
       [data-type="if"] .node-shape, [data-type="while"] .node-shape, [data-type="do-while"] .node-shape { fill: url(#grad-cond); stroke: #b45309; }
+      [data-type="break"] .node-shape { fill: url(#grad-break); stroke: #ea580c; }
+      [data-type="continue"] .node-shape { fill: url(#grad-continue); stroke: #0f766e; }
       
       /* Sticky Note - light yellow background with dark brown text */
       [data-type="note"] .node-shape { fill: #fef9c3; stroke: #eab308; }

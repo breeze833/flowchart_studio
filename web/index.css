@@ -543,6 +543,8 @@ body {
 .io-icon { color: var(--color-io); }
 .cond-icon { color: var(--color-cond); }
 .call-icon { color: var(--color-call); }
+.break-icon { color: #f97316; }
+.continue-icon { color: #14b8a6; }
 
 /* --- Modal Overlays --- */
 .modal-overlay {

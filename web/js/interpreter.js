@@ -87,14 +87,18 @@ export class FlowchartInterpreter {
     this.callStack.push({
       procedureName: name,
       localScope: localScope,
-      arguments: argValues
+      arguments: argValues,
+      loopDepth: 0
     });
 
     const body = proc.body || [];
-    const retVal = yield* this.executeBlockList(body);
+    const res = yield* this.executeBlockList(body);
 
     this.callStack.pop();
-    return retVal;
+    if (res && res.type === "RETURN") {
+      return res.value;
+    }
+    return undefined;
   }
 
 
@@ -141,8 +145,8 @@ export class FlowchartInterpreter {
   *executeBlockList(blockList) {
     for (const node of blockList) {
       const res = yield* this.executeNode(node);
-      if (res && res.type === "RETURN") {
-        return res.value;
+      if (res && (res.type === "RETURN" || res.type === "BREAK" || res.type === "CONTINUE")) {
+        return res;
       }
     }
     return undefined;
@@ -219,40 +223,76 @@ export class FlowchartInterpreter {
           const cond = yield* this.evaluateExpression(node.condition, currentScope);
           if (cond) {
             const res = yield* this.executeBlockList(node.trueBranch || []);
-            if (res && res.type === "RETURN") return res;
+            if (res && (res.type === "RETURN" || res.type === "BREAK" || res.type === "CONTINUE")) return res;
           } else {
             const res = yield* this.executeBlockList(node.falseBranch || []);
-            if (res && res.type === "RETURN") return res;
+            if (res && (res.type === "RETURN" || res.type === "BREAK" || res.type === "CONTINUE")) return res;
           }
           break;
         }
 
         case "while": {
-          while (true) {
-            // Highlight the while block itself in each iteration when checking the condition
-            yield { type: "HIGHLIGHT", nodeId: node.id };
+          const frame = this.getCurrentFrame();
+          if (frame) frame.loopDepth++;
+          try {
+            while (true) {
+              // Highlight the while block itself in each iteration when checking the condition
+              yield { type: "HIGHLIGHT", nodeId: node.id };
 
-            const freshScope = this.getCurrentScope();
-            const cond = yield* this.evaluateExpression(node.condition, freshScope);
-            if (!cond) break;
+              const freshScope = this.getCurrentScope();
+              const cond = yield* this.evaluateExpression(node.condition, freshScope);
+              if (!cond) break;
 
-            const res = yield* this.executeBlockList(node.loopBody || []);
-            if (res && res.type === "RETURN") return res;
+              const res = yield* this.executeBlockList(node.loopBody || []);
+              if (res) {
+                if (res.type === "RETURN") return res;
+                if (res.type === "BREAK") break;
+                if (res.type === "CONTINUE") continue;
+              }
+            }
+          } finally {
+            if (frame) frame.loopDepth--;
           }
           break;
         }
 
         case "do-while": {
-          while (true) {
-            const res = yield* this.executeBlockList(node.loopBody || []);
-            if (res && res.type === "RETURN") return res;
+          const frame = this.getCurrentFrame();
+          if (frame) frame.loopDepth++;
+          try {
+            while (true) {
+              const res = yield* this.executeBlockList(node.loopBody || []);
+              if (res) {
+                if (res.type === "RETURN") return res;
+                if (res.type === "BREAK") break;
+                // If CONTINUE, fall through to the condition check below
+              }
 
-            // Highlight the do-while block itself in each iteration when checking the condition
-            yield { type: "HIGHLIGHT", nodeId: node.id };
+              // Highlight the do-while block itself in each iteration when checking the condition
+              yield { type: "HIGHLIGHT", nodeId: node.id };
 
-            const freshScope = this.getCurrentScope();
-            const cond = yield* this.evaluateExpression(node.condition, freshScope);
-            if (!cond) break;
+              const freshScope = this.getCurrentScope();
+              const cond = yield* this.evaluateExpression(node.condition, freshScope);
+              if (!cond) break;
+            }
+          } finally {
+            if (frame) frame.loopDepth--;
+          }
+          break;
+        }
+
+        case "break": {
+          const frame = this.getCurrentFrame();
+          if (frame && frame.loopDepth > 0) {
+            return { type: "BREAK" };
+          }
+          break;
+        }
+
+        case "continue": {
+          const frame = this.getCurrentFrame();
+          if (frame && frame.loopDepth > 0) {
+            return { type: "CONTINUE" };
           }
           break;
         }

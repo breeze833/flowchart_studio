@@ -59,6 +59,8 @@ export function createNode(type) {
   switch (type) {
     case "start":
     case "end":
+    case "break":
+    case "continue":
       break;
     case "return":
       node.expression = "";

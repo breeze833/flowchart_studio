@@ -115,3 +115,16 @@ while (true) {
   * Tab characters (`\t`) are expanded to 8 spaces: `\t` $\rightarrow$ `        `.
   * Embedded newlines (`\n`) are split and formatted as consecutive console lines, respecting the trailing inline flag.
   * **Type Segregation:** Inline appends are restricted to matching message types (e.g., output text will never append into system logs or input prompts, forcing a new line instead).
+
+---
+
+## 6. Loop Control Interruption (Break & Continue)
+
+To support procedural control flows inside loops, the execution engine implements loop control interruption blocks:
+
+* **Propagation Protocol:** When a `break` or `continue` block is executed, the interpreter yields execution highlights and returns a control flow object (`{ type: "BREAK" }` or `{ type: "CONTINUE" }`).
+* **Bubble-Up Propagation:** The control object bubbles up through nested block lists (e.g., nested `If-Else` branches) by terminating sequential block list execution and returning the flow control object.
+* **Innermost Enclosing Loop Catch:** When a loop node (`while` or `do-while`) receives the control flow object:
+  * `BREAK`: Immediately exits the loop's evaluation iteration.
+  * `CONTINUE`: Skips remaining blocks in the body and proceeds to the condition evaluation.
+* **Lexical Subroutine Boundaries:** If a control flow object reaches the top of a procedure/subroutine execution stack without finding an enclosing loop, it is safely discarded (resolved to `undefined`), ensuring it has no side effects outside loops.
